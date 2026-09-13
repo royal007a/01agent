@@ -19,7 +19,7 @@ PDFs supplied for this project:
 
 ## Quick start
 
-Requirements: Go 1.24 or newer and an API endpoint that implements either the
+Requirements: Go 1.25 or newer and an API endpoint that implements either the
 OpenAI Chat Completions protocol or the Anthropic Messages protocol.
 
 ```bash
@@ -75,5 +75,29 @@ docker run --rm \
   01agent:local --workdir /workspace "Summarize README.md"
 ```
 
+If `proxy.golang.org` is not reachable from the Docker daemon, pass a reachable
+Go module proxy with `--build-arg GOPROXY=<url>,direct`.
+
 Pushes to `main` publish `ghcr.io/royal007a/01agent:main`; version tags also
 publish a matching immutable image tag.
+
+## HTTP service
+
+The same image includes `01agentd` for network deployment. Health is public;
+executions require a bearer token. If model variables are missing, `/healthz`
+still reports the process as live while `/readyz` and `/v1/runs` return `503`.
+
+```bash
+export AGENT_API_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name 01agent-http -p 8080:8080 \
+  -e AGENT_API_TOKEN -e AGENT_PROVIDER -e AGENT_API_KEY \
+  -e AGENT_MODEL -e AGENT_BASE_URL \
+  --entrypoint /usr/local/bin/01agentd \
+  01agent:local
+
+curl http://127.0.0.1:8080/healthz
+curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize README.md"}' \
+  http://127.0.0.1:8080/v1/runs
+```

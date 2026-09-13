@@ -24,4 +24,6 @@ jobs:
       - name: Test with race detector
         run: go test -race -coverprofile=coverage.out ./...
       - name: Build CLI
-        run: go build ./cmd/01agent
+        run: go build -o /tmp/01agent ./cmd/01agent
+      - name: Build HTTP service
+        run: go build -o /tmp/01agentd ./cmd/01agentd

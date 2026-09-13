@@ -1,8 +1,7 @@
 # Deployment
 
-`01agent` is a one-shot CLI rather than a long-running HTTP service. Deployment
-therefore means publishing a reproducible executable container that operators
-run with a prompt, credentials, and a mounted workspace.
+The deployment image ships both the one-shot `01agent` CLI and the `01agentd`
+HTTP service in one reproducible container.
 
 ## Automated GHCR publication
 
@@ -36,6 +35,18 @@ docker run --rm \
 
 For the official provider endpoints, omit `AGENT_BASE_URL`. For a compatible
 endpoint, set it to the provider's API base URL.
+
+## HTTP runtime
+
+Run `/usr/local/bin/01agentd` as the container entrypoint and publish port 8080.
+`GET /healthz` is unauthenticated for load balancers. `GET /readyz` reports
+whether a model provider is configured. `POST /v1/runs` requires
+`Authorization: Bearer $AGENT_API_TOKEN` and a JSON body such as
+`{"prompt":"Summarize README.md"}`.
+
+The service limits request bodies, concurrent runs, total run time, turns,
+repeated calls, and tool duration. Keep the workspace mount read-only for this
+release.
 
 ## Rollback
 

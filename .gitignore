@@ -1,5 +1,6 @@
 .DS_Store
 .env
+/01agent
 bin/
 coverage.out
 dist/
