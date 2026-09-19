@@ -79,18 +79,25 @@ type CaseResult struct {
 }
 
 type Report struct {
-	Suite             string       `json:"suite"`
-	StartedAt         time.Time    `json:"started_at"`
-	CompletedAt       time.Time    `json:"completed_at"`
-	Cases             int          `json:"cases"`
-	Passed            int          `json:"passed"`
-	PassRate          float64      `json:"pass_rate"`
-	Gate              float64      `json:"gate"`
-	GatePassed        bool         `json:"gate_passed"`
-	TotalInputTokens  int64        `json:"total_input_tokens"`
-	TotalOutputTokens int64        `json:"total_output_tokens"`
-	EstimatedCostUSD  float64      `json:"estimated_cost_usd"`
-	Results           []CaseResult `json:"results"`
+	Suite              string         `json:"suite"`
+	StartedAt          time.Time      `json:"started_at"`
+	CompletedAt        time.Time      `json:"completed_at"`
+	Cases              int            `json:"cases"`
+	Passed             int            `json:"passed"`
+	PassRate           float64        `json:"pass_rate"`
+	ToolCorrect        int            `json:"tool_correct"`
+	ToolAccuracy       float64        `json:"tool_accuracy"`
+	TerminationReasons map[string]int `json:"termination_reasons"`
+	TotalTurns         int            `json:"total_turns"`
+	AverageTurns       float64        `json:"average_turns"`
+	TotalInputTokens   int64          `json:"total_input_tokens"`
+	TotalOutputTokens  int64          `json:"total_output_tokens"`
+	TotalLatencyMS     int64          `json:"total_latency_ms"`
+	AverageLatencyMS   float64        `json:"average_latency_ms"`
+	EstimatedCostUSD   float64        `json:"estimated_cost_usd"`
+	Gate               float64        `json:"gate"`
+	GatePassed         bool           `json:"gate_passed"`
+	Results            []CaseResult   `json:"results"`
 }
 
 func LoadSuite(path string) (Suite, error) {
@@ -127,7 +134,10 @@ func Run(ctx context.Context, suite Suite, artifactsDir string) (Report, error) 
 	if err != nil {
 		return Report{}, err
 	}
-	report := Report{Suite: suite.Name, StartedAt: started, Cases: len(suite.Cases), Gate: suite.MinimumPassRate}
+	report := Report{
+		Suite: suite.Name, StartedAt: started, Cases: len(suite.Cases), Gate: suite.MinimumPassRate,
+		TerminationReasons: make(map[string]int),
+	}
 	for _, item := range suite.Cases {
 		caseResult, runErr := runCase(ctx, store, artifactsDir, suite, item)
 		if runErr != nil {
@@ -137,11 +147,20 @@ func Run(ctx context.Context, suite Suite, artifactsDir string) (Report, error) 
 		if caseResult.Passed {
 			report.Passed++
 		}
+		if caseResult.ToolCorrect {
+			report.ToolCorrect++
+		}
+		report.TerminationReasons[string(caseResult.Reason)]++
+		report.TotalTurns += caseResult.Turns
 		report.TotalInputTokens += caseResult.InputTokens
 		report.TotalOutputTokens += caseResult.OutputTokens
+		report.TotalLatencyMS += caseResult.LatencyMS
 		report.EstimatedCostUSD += caseResult.EstimatedCostUSD
 	}
 	report.PassRate = float64(report.Passed) / float64(report.Cases)
+	report.ToolAccuracy = float64(report.ToolCorrect) / float64(report.Cases)
+	report.AverageTurns = float64(report.TotalTurns) / float64(report.Cases)
+	report.AverageLatencyMS = float64(report.TotalLatencyMS) / float64(report.Cases)
 	report.GatePassed = report.PassRate >= report.Gate
 	report.CompletedAt = time.Now().UTC()
 	return report, nil
