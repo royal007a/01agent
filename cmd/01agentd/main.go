@@ -14,7 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/royal007a/01agent/internal/contextmanager"
+	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
+	"github.com/royal007a/01agent/internal/runstore"
 	agentserver "github.com/royal007a/01agent/internal/server"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -36,30 +39,67 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize read_file: %w", err)
 	}
+	enableDangerous := envBool("AGENT_ENABLE_DANGEROUS_TOOLS", false)
+	policy := tools.PermissionPolicy(tools.ReadOnlyPolicy{})
+	if enableDangerous {
+		policy = tools.ApprovalPolicy{}
+	}
 	registry := tools.NewRegistry(
+		tools.WithPermissionPolicy(policy),
 		tools.WithMaxParallel(envInt("AGENT_MAX_PARALLEL", 4)),
 		tools.WithToolTimeout(envDuration("AGENT_TOOL_TIMEOUT", 30*time.Second)),
 	)
 	if err := registry.Register(readFile); err != nil {
 		return fmt.Errorf("register read_file: %w", err)
 	}
+	if enableDangerous {
+		writeFile, toolErr := tools.NewWriteFileTool(*workDir)
+		if toolErr != nil {
+			return fmt.Errorf("initialize write_file: %w", toolErr)
+		}
+		editFile, toolErr := tools.NewEditFileTool(*workDir)
+		if toolErr != nil {
+			return fmt.Errorf("initialize edit_file: %w", toolErr)
+		}
+		bashTool, toolErr := tools.NewBashTool(*workDir)
+		if toolErr != nil {
+			return fmt.Errorf("initialize bash: %w", toolErr)
+		}
+		for _, tool := range []tools.BaseTool{writeFile, editFile, bashTool} {
+			if toolErr := registry.Register(tool); toolErr != nil {
+				return fmt.Errorf("register %s: %w", tool.Name(), toolErr)
+			}
+		}
+	}
 
 	model, providerErr := providerFromEnv()
 	if providerErr != nil {
 		log.Printf("provider not ready: %v", providerErr)
 	}
+	store, err := runstore.New(envOr("AGENT_RUN_DIR", "/tmp/01agent-runs"))
+	if err != nil {
+		return fmt.Errorf("initialize run store: %w", err)
+	}
+	var compactor engine.ContextCompactor
+	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
+		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5}
+	}
 	handler, err := agentserver.New(agentserver.Config{
-		Version:         version,
-		Token:           os.Getenv("AGENT_API_TOKEN"),
-		WorkDir:         *workDir,
-		Provider:        model,
-		Registry:        registry,
-		EnableThinking:  envBool("AGENT_THINKING", false),
-		MaxTurns:        envInt("AGENT_MAX_TURNS", 32),
-		MaxTokens:       envInt64("AGENT_TOKEN_BUDGET", 0),
-		MaxRepeatedCall: envInt("AGENT_MAX_REPEATED_CALL", 3),
-		RunTimeout:      envDuration("AGENT_RUN_TIMEOUT", 10*time.Minute),
-		MaxConcurrent:   envInt("AGENT_MAX_CONCURRENT", 2),
+		Version:          version,
+		Token:            os.Getenv("AGENT_API_TOKEN"),
+		WorkDir:          *workDir,
+		Provider:         model,
+		Registry:         registry,
+		EnableThinking:   envBool("AGENT_THINKING", false),
+		MaxTurns:         envInt("AGENT_MAX_TURNS", 32),
+		MaxTokens:        envInt64("AGENT_TOKEN_BUDGET", 0),
+		MaxRepeatedCall:  envInt("AGENT_MAX_REPEATED_CALL", 3),
+		RunTimeout:       envDuration("AGENT_RUN_TIMEOUT", 10*time.Minute),
+		MaxConcurrent:    envInt("AGENT_MAX_CONCURRENT", 2),
+		Store:            store,
+		Compactor:        compactor,
+		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),
+		ReadinessTimeout: envDuration("AGENT_READINESS_TIMEOUT", 10*time.Second),
 	})
 	if err != nil {
 		return err
@@ -110,16 +150,26 @@ func providerFromEnv() (provider.LLMProvider, error) {
 		if err != nil {
 			return nil, err
 		}
-		return model, nil
+		return resilient(model), nil
 	case "claude", "anthropic":
 		model, err := provider.NewClaude(config)
 		if err != nil {
 			return nil, err
 		}
-		return model, nil
+		return resilient(model), nil
 	default:
 		return nil, fmt.Errorf("unsupported AGENT_PROVIDER %q", protocol)
 	}
+}
+
+func resilient(model provider.LLMProvider) provider.LLMProvider {
+	return provider.WithResilience(model, provider.ResilienceConfig{
+		MaxAttempts:       envInt("AGENT_PROVIDER_ATTEMPTS", 3),
+		BaseDelay:         envDuration("AGENT_PROVIDER_BASE_DELAY", 250*time.Millisecond),
+		MaxDelay:          envDuration("AGENT_PROVIDER_MAX_DELAY", 5*time.Second),
+		MinRequestSpacing: envDurationAllowZero("AGENT_PROVIDER_SPACING", 0),
+		MaxConcurrent:     envInt("AGENT_PROVIDER_CONCURRENCY", 4),
+	})
 }
 
 func envOr(name, fallback string) string {
@@ -151,6 +201,18 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func envDurationAllowZero(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func envBool(name string, fallback bool) bool {

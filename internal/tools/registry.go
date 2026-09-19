@@ -141,7 +141,11 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		if reason == "" {
 			reason = "tool use denied by policy"
 		}
-		return errorResult(call.ID, "permission_denied", reason, false, true)
+		code := "permission_denied"
+		if decision.RequiresApproval {
+			code = "approval_required"
+		}
+		return errorResult(call.ID, code, reason, false, true)
 	}
 
 	toolCtx := ctx

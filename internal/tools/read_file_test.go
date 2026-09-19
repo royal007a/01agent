@@ -88,7 +88,7 @@ func TestReadFileRejectsSymlinkEscape(t *testing.T) {
 	}
 
 	_, err = tool.Execute(context.Background(), json.RawMessage(`{"path":"link.txt"}`))
-	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace") {
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("error = %v, want symlink escape", err)
 	}
 }

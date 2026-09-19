@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/royal007a/01agent/internal/schema"
 	"github.com/royal007a/01agent/internal/tools"
@@ -18,6 +20,12 @@ import (
 type testProvider struct {
 	calls atomic.Int32
 	t     *testing.T
+}
+
+type failingProvider struct{}
+
+func (failingProvider) Generate(context.Context, []schema.Message, []schema.ToolDefinition) (schema.Generation, error) {
+	return schema.Generation{}, errors.New("invalid provider credentials")
 }
 
 func (p *testProvider) Generate(_ context.Context, messages []schema.Message, definitions []schema.ToolDefinition) (schema.Generation, error) {
@@ -96,5 +104,20 @@ func TestHandlerReportsNotReadyWithoutProvider(t *testing.T) {
 func TestHandlerRequiresToken(t *testing.T) {
 	if _, err := New(Config{WorkDir: t.TempDir(), Registry: tools.NewRegistry()}); err == nil {
 		t.Fatal("New accepted an empty token")
+	}
+}
+
+func TestReadinessPerformsRealProviderProbe(t *testing.T) {
+	handler, err := New(Config{
+		Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Provider: failingProvider{},
+		ReadinessTTL: time.Minute, ReadinessTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := httptest.NewRecorder()
+	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusServiceUnavailable || !strings.Contains(ready.Body.String(), "invalid provider credentials") {
+		t.Fatalf("ready = %d %s", ready.Code, ready.Body.String())
 	}
 }

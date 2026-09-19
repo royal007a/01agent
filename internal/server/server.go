@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/royal007a/01agent/internal/engine"
@@ -18,28 +21,37 @@ import (
 const maxRequestBytes = 1 << 20
 
 type Config struct {
-	Version         string
-	Token           string
-	WorkDir         string
-	Provider        provider.LLMProvider
-	Registry        tools.Registry
-	EnableThinking  bool
-	MaxTurns        int
-	MaxTokens       int64
-	MaxRepeatedCall int
-	RunTimeout      time.Duration
-	MaxConcurrent   int
+	Version          string
+	Token            string
+	WorkDir          string
+	Provider         provider.LLMProvider
+	Registry         tools.Registry
+	EnableThinking   bool
+	MaxTurns         int
+	MaxTokens        int64
+	MaxRepeatedCall  int
+	RunTimeout       time.Duration
+	MaxConcurrent    int
+	Store            engine.RunStore
+	Compactor        engine.ContextCompactor
+	ReadinessTTL     time.Duration
+	ReadinessTimeout time.Duration
 }
 
 type Handler struct {
 	config    Config
 	semaphore chan struct{}
 	mux       *http.ServeMux
+	readyMu   sync.Mutex
+	readyAt   time.Time
+	readyErr  error
 }
 
 type runRequest struct {
-	Prompt   string `json:"prompt"`
-	Thinking *bool  `json:"thinking,omitempty"`
+	Prompt        string   `json:"prompt"`
+	Thinking      *bool    `json:"thinking,omitempty"`
+	ResumeRunID   string   `json:"resume_run_id,omitempty"`
+	ApprovedTools []string `json:"approved_tools,omitempty"`
 }
 
 type errorResponse struct {
@@ -68,6 +80,12 @@ func New(config Config) (*Handler, error) {
 	if config.MaxConcurrent <= 0 {
 		config.MaxConcurrent = 2
 	}
+	if config.ReadinessTTL <= 0 {
+		config.ReadinessTTL = 5 * time.Minute
+	}
+	if config.ReadinessTimeout <= 0 {
+		config.ReadinessTimeout = 10 * time.Second
+	}
 	handler := &Handler{config: config, semaphore: make(chan struct{}, config.MaxConcurrent), mux: http.NewServeMux()}
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.HandleFunc("GET /readyz", handler.ready)
@@ -83,12 +101,24 @@ func (h *Handler) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{"status": "ok", "version": h.config.Version})
 }
 
-func (h *Handler) ready(writer http.ResponseWriter, _ *http.Request) {
+func (h *Handler) ready(writer http.ResponseWriter, request *http.Request) {
 	if h.config.Provider == nil {
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "model provider is not configured"})
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"status": "ready"})
+	h.readyMu.Lock()
+	defer h.readyMu.Unlock()
+	if h.readyAt.IsZero() || time.Since(h.readyAt) >= h.config.ReadinessTTL {
+		ctx, cancel := context.WithTimeout(request.Context(), h.config.ReadinessTimeout)
+		_, h.readyErr = h.config.Provider.Generate(ctx, []schema.Message{{Role: schema.RoleUser, Content: "Reply with OK only."}}, nil)
+		cancel()
+		h.readyAt = time.Now().UTC()
+	}
+	if h.readyErr != nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": h.readyErr.Error(), "checked_at": h.readyAt})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"status": "ready", "checked_at": h.readyAt})
 }
 
 func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
@@ -113,14 +143,33 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "invalid JSON request: " + err.Error()})
 		return
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "request body must contain exactly one JSON object"})
+		return
+	}
 	input.Prompt = strings.TrimSpace(input.Prompt)
-	if input.Prompt == "" {
-		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "prompt is required"})
+	input.ResumeRunID = strings.TrimSpace(input.ResumeRunID)
+	if (input.Prompt == "") == (input.ResumeRunID == "") {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "provide exactly one of prompt or resume_run_id"})
 		return
 	}
 	if len(input.Prompt) > 32_768 {
 		writeJSON(writer, http.StatusRequestEntityTooLarge, errorResponse{Error: "prompt exceeds 32768 bytes"})
 		return
+	}
+	if len(input.ApprovedTools) > 16 {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "approved_tools exceeds 16 entries"})
+		return
+	}
+	available := make(map[string]bool)
+	for _, definition := range h.config.Registry.GetAvailableTools() {
+		available[definition.Name] = true
+	}
+	for _, name := range input.ApprovedTools {
+		if !available[name] {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "cannot approve unavailable tool: " + name})
+			return
+		}
 	}
 	thinking := h.config.EnableThinking
 	if input.Thinking != nil {
@@ -134,12 +183,30 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 		MaxTokens:       h.config.MaxTokens,
 		MaxRepeatedCall: h.config.MaxRepeatedCall,
 		Timeout:         h.config.RunTimeout,
+		Store:           h.config.Store,
+		Compactor:       h.config.Compactor,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 		return
 	}
-	result, runErr := agent.Run(request.Context(), input.Prompt)
+	var result engine.RunResult
+	var runErr error
+	runContext := tools.WithApprovedTools(request.Context(), input.ApprovedTools)
+	if input.ResumeRunID != "" {
+		if h.config.Store == nil {
+			writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "checkpoint store is not configured"})
+			return
+		}
+		checkpoint, err := h.config.Store.LoadCheckpoint(runContext, input.ResumeRunID)
+		if err != nil {
+			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "checkpoint not found: " + err.Error()})
+			return
+		}
+		result, runErr = agent.Resume(runContext, checkpoint)
+	} else {
+		result, runErr = agent.Run(runContext, input.Prompt)
+	}
 	status := statusFor(result.Reason)
 	response := map[string]any{"result": result}
 	if runErr != nil {
@@ -167,6 +234,8 @@ func statusFor(reason schema.TerminalReason) int {
 		return http.StatusOK
 	case schema.TerminalPermissionDenied:
 		return http.StatusForbidden
+	case schema.TerminalApprovalRequired:
+		return http.StatusPreconditionRequired
 	case schema.TerminalTimeout, schema.TerminalAborted:
 		return http.StatusRequestTimeout
 	case schema.TerminalProviderError:

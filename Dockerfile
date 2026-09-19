@@ -15,11 +15,22 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/01agentd ./cmd/01agentd
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/01agent-eval ./cmd/01agent-eval
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/01agent-replay ./cmd/01agent-replay
 
-FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+FROM alpine:3.22
+RUN apk add --no-cache bash ca-certificates
 COPY --from=build /out/01agent /usr/local/bin/01agent
 COPY --from=build /out/01agentd /usr/local/bin/01agentd
+COPY --from=build /out/01agent-eval /usr/local/bin/01agent-eval
+COPY --from=build /out/01agent-replay /usr/local/bin/01agent-replay
+COPY evals /workspace/evals
 COPY README.md /workspace/README.md
 USER 65532:65532
 WORKDIR /workspace

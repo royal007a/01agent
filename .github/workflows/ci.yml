@@ -27,3 +27,9 @@ jobs:
         run: go build -o /tmp/01agent ./cmd/01agent
       - name: Build HTTP service
         run: go build -o /tmp/01agentd ./cmd/01agentd
+      - name: Build evaluator and replay tool
+        run: |
+          go build -o /tmp/01agent-eval ./cmd/01agent-eval
+          go build -o /tmp/01agent-replay ./cmd/01agent-replay
+      - name: Run deterministic evaluation gate
+        run: go run ./cmd/01agent-eval --suite evals/runtime.json --artifacts /tmp/01agent-eval --report /tmp/01agent-eval/report.json

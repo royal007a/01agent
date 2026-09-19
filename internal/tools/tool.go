@@ -30,8 +30,9 @@ type BaseTool interface {
 }
 
 type PermissionDecision struct {
-	Allowed bool
-	Reason  string
+	Allowed          bool
+	Reason           string
+	RequiresApproval bool
 }
 
 type PermissionPolicy interface {

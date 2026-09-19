@@ -20,6 +20,7 @@ const (
 
 type ReadFileTool struct {
 	workDir string
+	root    *os.Root
 }
 
 type readFileArgs struct {
@@ -33,18 +34,18 @@ func NewReadFileTool(workDir string) (*ReadFileTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve workdir: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return nil, fmt.Errorf("resolve workdir symlinks: %w", err)
-	}
-	info, err := os.Stat(resolved)
+	info, err := os.Stat(absolute)
 	if err != nil {
 		return nil, fmt.Errorf("stat workdir: %w", err)
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workdir %q is not a directory", workDir)
 	}
-	return &ReadFileTool{workDir: filepath.Clean(resolved)}, nil
+	root, err := os.OpenRoot(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("open workspace root: %w", err)
+	}
+	return &ReadFileTool{workDir: filepath.Clean(absolute), root: root}, nil
 }
 
 func (t *ReadFileTool) Name() string { return "read_file" }
@@ -114,7 +115,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, arguments json.RawMessage) (
 	if err != nil {
 		return "", &Error{Code: "path_outside_workspace", Message: err.Error(), Retryable: true}
 	}
-	file, err := os.Open(path)
+	file, err := t.root.OpenFile(path, os.O_RDONLY|nonblockFlag, 0)
 	if err != nil {
 		return "", &Error{Code: "open_file", Message: err.Error(), Retryable: true}
 	}
@@ -163,26 +164,14 @@ func (t *ReadFileTool) Execute(ctx context.Context, arguments json.RawMessage) (
 }
 
 func (t *ReadFileTool) confinedPath(input string) (string, error) {
-	candidate := filepath.Clean(filepath.Join(t.workDir, input))
-	if !inside(t.workDir, candidate) {
+	if filepath.IsAbs(input) {
+		return "", fmt.Errorf("path %q must be relative to workspace", input)
+	}
+	clean := filepath.Clean(input)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes workspace", input)
 	}
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", err
-	}
-	if !inside(t.workDir, resolved) {
-		return "", fmt.Errorf("path %q resolves outside workspace", input)
-	}
-	return resolved, nil
-}
-
-func inside(root, candidate string) bool {
-	relative, err := filepath.Rel(root, candidate)
-	if err != nil {
-		return false
-	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
+	return clean, nil
 }
 
 func errorsForArgument(name, message string) error {

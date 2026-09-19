@@ -45,6 +45,28 @@ type fakeRegistry struct {
 	calls       int
 }
 
+type memoryStore struct {
+	checkpoint Checkpoint
+	events     []Event
+	result     RunResult
+}
+
+func (m *memoryStore) Record(_ context.Context, event Event) error {
+	m.events = append(m.events, event)
+	return nil
+}
+func (m *memoryStore) SaveCheckpoint(_ context.Context, checkpoint Checkpoint) error {
+	m.checkpoint = checkpoint
+	return nil
+}
+func (m *memoryStore) Complete(_ context.Context, result RunResult) error {
+	m.result = result
+	return nil
+}
+func (m *memoryStore) LoadCheckpoint(context.Context, string) (Checkpoint, error) {
+	return m.checkpoint, nil
+}
+
 func (f *fakeRegistry) Register(toolruntime.BaseTool) error { return nil }
 func (f *fakeRegistry) GetAvailableTools() []schema.ToolDefinition {
 	return append([]schema.ToolDefinition(nil), f.definitions...)
@@ -210,5 +232,31 @@ func TestRunStopsOnPermissionDenial(t *testing.T) {
 	}
 	if result.Reason != schema.TerminalPermissionDenied {
 		t.Fatalf("reason = %s", result.Reason)
+	}
+}
+
+func TestRunCanResumeFromCheckpoint(t *testing.T) {
+	store := &memoryStore{}
+	firstModel := &scriptedProvider{generations: []schema.Generation{{Message: schema.Message{ToolCalls: []schema.ToolCall{{ID: "read-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"x"}`)}}}}}}
+	workDir := t.TempDir()
+	first, err := New(firstModel, newFakeRegistry(), Config{WorkDir: workDir, MaxTurns: 1, Store: store, RunID: "run-resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := first.Run(context.Background(), "inspect")
+	if err != nil || result.Reason != schema.TerminalMaxTurns {
+		t.Fatalf("first result=%#v err=%v", result, err)
+	}
+	secondModel := &scriptedProvider{generations: []schema.Generation{{Message: schema.Message{Content: "resumed"}}}}
+	second, err := New(secondModel, newFakeRegistry(), Config{WorkDir: workDir, MaxTurns: 2, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := second.Resume(context.Background(), store.checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Reason != schema.TerminalCompleted || resumed.Turns != 2 || resumed.RunID != "run-resume" || resumed.FinalMessage.Content != "resumed" {
+		t.Fatalf("resumed = %#v", resumed)
 	}
 }

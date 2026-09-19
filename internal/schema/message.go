@@ -91,4 +91,6 @@ const (
 	TerminalBudgetExceeded   TerminalReason = "budget_exceeded"
 	TerminalFatalToolError   TerminalReason = "fatal_tool_error"
 	TerminalProviderError    TerminalReason = "provider_error"
+	TerminalPersistenceError TerminalReason = "persistence_error"
+	TerminalApprovalRequired TerminalReason = "approval_required"
 )

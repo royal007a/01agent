@@ -1,0 +1,206 @@
+{
+  "name": "01agent-runtime-v1",
+  "minimum_pass_rate": 1.0,
+  "input_usd_per_million": 1.0,
+  "output_usd_per_million": 3.0,
+  "cases": [
+    {
+      "id": "direct-final",
+      "prompt": "Answer directly.",
+      "script": [{"content": "OK", "usage": {"input_tokens": 4, "output_tokens": 1}}],
+      "expected": {"reason": "completed", "answer_contains": "OK", "tool_sequence": [], "min_turns": 1, "max_turns": 1}
+    },
+    {
+      "id": "read-single",
+      "prompt": "Read hello.txt.",
+      "files": {"hello.txt": "hello world"},
+      "script": [
+        {"tool_calls": [{"id": "r1", "name": "read_file", "arguments": {"path": "hello.txt"}}], "usage": {"input_tokens": 8, "output_tokens": 2}},
+        {"content": "hello world", "usage": {"input_tokens": 12, "output_tokens": 3}}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "hello", "tool_sequence": ["read_file"], "min_turns": 2, "max_turns": 2}
+    },
+    {
+      "id": "read-nested",
+      "prompt": "Read nested/config.txt.",
+      "files": {"nested/config.txt": "nested value"},
+      "script": [
+        {"tool_calls": [{"id": "r1", "name": "read_file", "arguments": {"path": "nested/config.txt"}}]},
+        {"content": "nested value"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "nested", "tool_sequence": ["read_file"]}
+    },
+    {
+      "id": "read-pagination",
+      "prompt": "Read the file in two pages.",
+      "files": {"page.txt": "abcdefghij"},
+      "script": [
+        {"tool_calls": [{"id": "p1", "name": "read_file", "arguments": {"path": "page.txt", "offset": 0, "limit": 4}}]},
+        {"tool_calls": [{"id": "p2", "name": "read_file", "arguments": {"path": "page.txt", "offset": 4, "limit": 6}}]},
+        {"content": "abcdefghij"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "abcdefghij", "tool_sequence": ["read_file", "read_file"], "min_turns": 3, "max_turns": 3}
+    },
+    {
+      "id": "parallel-reads",
+      "prompt": "Read both files.",
+      "files": {"a.txt": "A", "b.txt": "B"},
+      "script": [
+        {"tool_calls": [
+          {"id": "a", "name": "read_file", "arguments": {"path": "a.txt"}},
+          {"id": "b", "name": "read_file", "arguments": {"path": "b.txt"}}
+        ]},
+        {"content": "A B"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "A B", "tool_sequence": ["read_file", "read_file"]}
+    },
+    {
+      "id": "unknown-tool-recovery",
+      "prompt": "Recover from an unknown tool.",
+      "script": [
+        {"tool_calls": [{"id": "u1", "name": "missing_tool", "arguments": {}}]},
+        {"content": "recovered"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "recovered", "tool_sequence": ["missing_tool"]}
+    },
+    {
+      "id": "schema-error-recovery",
+      "prompt": "Recover from invalid arguments.",
+      "script": [
+        {"tool_calls": [{"id": "s1", "name": "read_file", "arguments": {"wrong": true}}]},
+        {"content": "schema recovered"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "recovered", "tool_sequence": ["read_file"]}
+    },
+    {
+      "id": "missing-file-recovery",
+      "prompt": "Handle a missing file.",
+      "script": [
+        {"tool_calls": [{"id": "m1", "name": "read_file", "arguments": {"path": "missing.txt"}}]},
+        {"content": "missing handled"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "handled", "tool_sequence": ["read_file"]}
+    },
+    {
+      "id": "traversal-recovery",
+      "prompt": "Do not escape the workspace.",
+      "script": [
+        {"tool_calls": [{"id": "t1", "name": "read_file", "arguments": {"path": "../secret"}}]},
+        {"content": "escape rejected"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "rejected", "tool_sequence": ["read_file"]}
+    },
+    {
+      "id": "repeated-call-stop",
+      "prompt": "Stop a doom loop.",
+      "files": {"x.txt": "x"},
+      "script": [{"tool_calls": [{"id": "loop", "name": "read_file", "arguments": {"path": "x.txt"}}]}],
+      "repeat_last": true,
+      "max_turns": 8,
+      "max_repeated_call": 2,
+      "expected": {"reason": "fatal_tool_error", "tool_sequence": ["read_file", "read_file"], "min_turns": 3, "max_turns": 3}
+    },
+    {
+      "id": "max-turns-stop",
+      "prompt": "Respect the turn limit.",
+      "files": {"x.txt": "x"},
+      "script": [
+        {"tool_calls": [{"id": "one", "name": "read_file", "arguments": {"path": "x.txt", "offset": 0}}]},
+        {"tool_calls": [{"id": "two", "name": "read_file", "arguments": {"path": "x.txt", "offset": 1}}]}
+      ],
+      "max_turns": 2,
+      "max_repeated_call": 10,
+      "expected": {"reason": "max_turns", "tool_sequence": ["read_file", "read_file"], "min_turns": 2, "max_turns": 2}
+    },
+    {
+      "id": "token-budget-stop",
+      "prompt": "Respect the token budget.",
+      "script": [{"content": "too expensive", "usage": {"input_tokens": 10, "output_tokens": 5}}],
+      "max_tokens": 12,
+      "expected": {"reason": "budget_exceeded", "tool_sequence": [], "min_turns": 1, "max_turns": 1}
+    },
+    {
+      "id": "timeout-stop",
+      "prompt": "Respect the deadline.",
+      "script": [{"content": "late", "delay_ms": 100}],
+      "timeout_ms": 20,
+      "expected": {"reason": "timeout", "tool_sequence": [], "min_turns": 1, "max_turns": 1}
+    },
+    {
+      "id": "provider-error",
+      "prompt": "Surface provider failure.",
+      "script": [{"error": "provider unavailable"}],
+      "expected": {"reason": "provider_error", "tool_sequence": [], "min_turns": 1, "max_turns": 1}
+    },
+    {
+      "id": "thinking-action",
+      "prompt": "Plan, read, and answer.",
+      "files": {"thought.txt": "evidence"},
+      "thinking": true,
+      "script": [
+        {"content": "I should inspect the file."},
+        {"tool_calls": [{"id": "th1", "name": "read_file", "arguments": {"path": "thought.txt"}}]},
+        {"content": "I have the evidence."},
+        {"content": "evidence confirmed"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "confirmed", "tool_sequence": ["read_file"], "min_turns": 2, "max_turns": 2}
+    },
+    {
+      "id": "context-compaction",
+      "prompt": "Read large.txt, then small.txt, and answer.",
+      "files": {"large.txt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+      "context_tokens": 300,
+      "script": [
+        {"tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "large.txt", "limit": 800}}]},
+        {"tool_calls": [{"id": "c2", "name": "read_file", "arguments": {"path": "small.txt"}}]},
+        {"content": "compacted successfully"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "successfully", "tool_sequence": ["read_file", "read_file"], "min_turns": 3, "min_compactions": 1}
+    },
+    {
+      "id": "write-requires-approval",
+      "prompt": "Create generated.txt.",
+      "enable_dangerous": true,
+      "script": [
+        {"tool_calls": [{"id": "w-denied", "name": "write_file", "arguments": {"path": "generated.txt", "content": "hello"}}]}
+      ],
+      "expected": {"reason": "approval_required", "tool_sequence": ["write_file"], "min_turns": 1, "max_turns": 1}
+    },
+    {
+      "id": "approved-write-read",
+      "prompt": "Create generated.txt, then verify it.",
+      "enable_dangerous": true,
+      "approved_tools": ["write_file"],
+      "script": [
+        {"tool_calls": [{"id": "w1", "name": "write_file", "arguments": {"path": "generated.txt", "content": "created by evaluator"}}]},
+        {"tool_calls": [{"id": "r1", "name": "read_file", "arguments": {"path": "generated.txt"}}]},
+        {"content": "write verified"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "verified", "tool_sequence": ["write_file", "read_file"], "min_turns": 3, "max_turns": 3}
+    },
+    {
+      "id": "approved-edit-read",
+      "prompt": "Update note.txt, then verify it.",
+      "files": {"note.txt": "old value"},
+      "enable_dangerous": true,
+      "approved_tools": ["edit_file"],
+      "script": [
+        {"tool_calls": [{"id": "e1", "name": "edit_file", "arguments": {"path": "note.txt", "old_text": "old", "new_text": "new"}}]},
+        {"tool_calls": [{"id": "r1", "name": "read_file", "arguments": {"path": "note.txt"}}]},
+        {"content": "edit verified"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "verified", "tool_sequence": ["edit_file", "read_file"], "min_turns": 3, "max_turns": 3}
+    },
+    {
+      "id": "approved-bash",
+      "prompt": "Run a harmless command.",
+      "enable_dangerous": true,
+      "approved_tools": ["bash"],
+      "script": [
+        {"tool_calls": [{"id": "b1", "name": "bash", "arguments": {"command": "printf evaluator-ok"}}]},
+        {"content": "bash verified"}
+      ],
+      "expected": {"reason": "completed", "answer_contains": "verified", "tool_sequence": ["bash"], "min_turns": 2, "max_turns": 2}
+    }
+  ]
+}
