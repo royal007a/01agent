@@ -19,8 +19,8 @@ building or publishing the image.
 
 ## Runtime
 
-Supply provider credentials only when running the image. Mount the workspace
-read-only because this release exposes only `read_file`:
+Supply provider credentials only when running the image. The safe default
+exposes only `read_file`, so mount the workspace read-only:
 
 ```bash
 docker run --rm \
@@ -39,14 +39,38 @@ endpoint, set it to the provider's API base URL.
 ## HTTP runtime
 
 Run `/usr/local/bin/01agentd` as the container entrypoint and publish port 8080.
-`GET /healthz` is unauthenticated for load balancers. `GET /readyz` reports
-whether a model provider is configured. `POST /v1/runs` requires
+`GET /healthz` is unauthenticated for load balancers. `GET /readyz` makes a
+real provider request and caches the result for `AGENT_READINESS_TTL` (five
+minutes by default). `POST /v1/runs` requires
 `Authorization: Bearer $AGENT_API_TOKEN` and a JSON body such as
 `{"prompt":"Summarize README.md"}`.
 
 The service limits request bodies, concurrent runs, total run time, turns,
-repeated calls, and tool duration. Keep the workspace mount read-only for this
-release.
+repeated calls, provider traffic, and tool duration. Persist `AGENT_RUN_DIR` so
+traces and checkpoints survive container replacement:
+
+```bash
+docker volume create 01agent-runs
+docker run -d --name 01agent-http -p 8080:8080 \
+  --env-file .env \
+  -v "$PWD:/workspace:ro" \
+  -v 01agent-runs:/var/lib/01agent/runs \
+  --entrypoint /usr/local/bin/01agentd \
+  ghcr.io/royal007a/01agent:main
+```
+
+To resume, POST `{"resume_run_id":"run-..."}`. The checkpoint includes its
+workspace path; resume rejects a mismatch and rejects already completed runs.
+
+## Dangerous-tool deployment
+
+Set `AGENT_ENABLE_DANGEROUS_TOOLS=true` only inside a disposable,
+least-privileged execution boundary and change the workspace mount to writable.
+Registration alone is insufficient: every HTTP run must also list the exact
+tools in `approved_tools`. Bash receives a minimal environment and bounded
+timeout/output, but it can invoke any binary and path visible inside the
+container. Do not mount Docker sockets, credentials, host roots, or unrelated
+data into that container.
 
 ## Rollback
 
