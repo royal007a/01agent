@@ -15,10 +15,16 @@ PDFs supplied for this project:
   tool failures;
 - a concurrency-aware tool registry with JSON Schema validation;
 - workspace-confined `read_file`, `write_file`, and `edit_file` tools plus an
-  explicitly approved Bash tool;
+  explicitly approved, platform-sandboxed Bash tool;
+- revisioned capability snapshots and post-approval Turn execution leases;
+- a canonical history writer with operation identity, semantic fingerprints,
+  revision CAS, durable commit barriers, and read-back acknowledgement;
 - JSONL traces, checkpoint/resume, deterministic replay, and context compaction;
+- durable claim/ack inputs for user steering, tool input, and child-task results;
+- a restart-safe background-task state machine with heartbeat, lost/reconcile,
+  result delivery, and consumption acknowledgement;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
-- a 20-task deterministic evaluator used as a required CI gate;
+- a 23-task deterministic evaluator used as a required CI gate;
 - a reproducible CLI, tests, container image, CI, and GHCR publishing.
 
 ## Quick start
@@ -38,7 +44,8 @@ export AGENT_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 ./bin/01agent --workdir . "Read README.md and summarize the architecture."
 ```
 
-Each run writes a JSONL trace, checkpoint, and final result under
+Each run writes a JSONL trace, canonical history, operation ledger, inbox, and
+final result under
 `$AGENT_RUN_DIR` (or the platform temporary directory by default). Resume an
 interrupted run with `--resume <run-id>` and validate a completed trace with:
 
@@ -68,6 +75,11 @@ set.
 - Repeated identical calls are stopped before they become a doom loop.
 - Provider retries apply only to transient failures and honor `Retry-After`.
 - Write/edit/Bash require both startup enablement and explicit per-run approval.
+- Approval is followed by a Turn-lease check immediately before physical tool
+  execution, preventing a late approval from reviving a canceled Turn.
+- Bash fails closed unless a platform sandbox is available. Linux uses Landlock
+  plus seccomp; macOS uses `sandbox-exec`. Both deny networking and restrict
+  writes to the workspace.
 
 To make dangerous tools available to the model in the CLI, opt in twice:
 
@@ -77,9 +89,9 @@ To make dangerous tools available to the model in the CLI, opt in twice:
   --workdir . "Update the requested files."
 ```
 
-`bash` is process-isolated only by the deployment boundary; it is not an OS
-sandbox. Run it in a disposable, least-privileged container and mount only the
-workspace it may access.
+The Bash sandbox is defense in depth, not a replacement for least-privileged
+deployment. Do not expose host credentials, Docker sockets, or unrelated data
+to the service container.
 
 See [the architecture](docs/architecture.md) and
 [the six-PDF reading notes](docs/reading-notes.md) for design rationale.
@@ -90,8 +102,8 @@ See [the architecture](docs/architecture.md) and
 make verify
 ```
 
-`make verify` formats-checks, vets, runs race-enabled tests, builds all four
-binaries, and executes the 20-case deterministic runtime suite. The evaluator
+`make verify` formats-checks, vets, runs race-enabled tests, builds all five
+binaries, and executes the 23-case deterministic runtime suite. The evaluator
 records success rate, tool-sequence correctness, terminal reason, turns, token
 usage, latency, and estimated cost. Its report and per-case traces are written
 to `artifacts/eval/`; the configured 100% gate makes CI fail on any regression.
@@ -139,3 +151,19 @@ curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
 Resume a saved checkpoint with `{"resume_run_id":"run-..."}`. When dangerous
 tools are enabled at server startup, each request must still name its approvals,
 for example `{"prompt":"...","approved_tools":["write_file"]}`.
+
+A caller can choose a stable run ID and steer it while it is active. Inputs are
+claimed, committed into canonical history, and acknowledged only after the
+commit barrier succeeds:
+
+```bash
+curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"steer-1","kind":"user_steer","content":"Also inspect deployment.md"}' \
+  http://127.0.0.1:8080/v1/runs/run-demo/inputs
+```
+
+Background workers use `POST /v1/tasks`, `GET /v1/tasks/{taskID}`, and
+`POST /v1/tasks/{taskID}/events`. Terminal task output is delivered to the
+parent run as a `task_result` input. The daemon reconciles stale heartbeats to
+`lost` and repairs delivery/consumption state after restart.

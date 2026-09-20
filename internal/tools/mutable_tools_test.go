@@ -3,11 +3,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	agentsandbox "github.com/royal007a/01agent/internal/sandbox"
 	"github.com/royal007a/01agent/internal/schema"
 )
 
@@ -70,7 +73,7 @@ func TestEditRejectsAmbiguousMatch(t *testing.T) {
 }
 
 func TestBashRequiresApproval(t *testing.T) {
-	tool, err := NewBashTool(t.TempDir())
+	tool, err := NewBashToolWithSandbox(t.TempDir(), directTestSandbox{})
 	if err != nil {
 		t.Skipf("bash unavailable: %v", err)
 	}
@@ -86,4 +89,35 @@ func TestBashRequiresApproval(t *testing.T) {
 	if result.IsError || !strings.Contains(result.Output, "ok") {
 		t.Fatalf("approved result = %#v", result)
 	}
+}
+
+func TestBashFailsClosedWhenPlatformSandboxCannotInitialize(t *testing.T) {
+	tool, err := NewBashToolWithSandbox(t.TempDir(), unavailableTestSandbox{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), json.RawMessage(`{"command":"printf should-not-run"}`))
+	var toolErr *Error
+	if !errors.As(err, &toolErr) || toolErr.Code != "sandbox_unavailable" || !toolErr.Fatal {
+		t.Fatalf("error=%#v", err)
+	}
+}
+
+type directTestSandbox struct{}
+
+func (directTestSandbox) Name() string { return "test" }
+
+func (directTestSandbox) Command(ctx context.Context, request agentsandbox.Request) (*exec.Cmd, error) {
+	command := exec.CommandContext(ctx, request.Executable, request.Arguments...)
+	command.Dir = request.WorkDir
+	command.Env = request.Env
+	return command, nil
+}
+
+type unavailableTestSandbox struct{}
+
+func (unavailableTestSandbox) Name() string { return "unavailable-test" }
+
+func (unavailableTestSandbox) Command(ctx context.Context, _ agentsandbox.Request) (*exec.Cmd, error) {
+	return exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-c", "printf '01agent-sandbox: kernel support missing' >&2; exit 126"), nil
 }

@@ -8,6 +8,7 @@ build:
 	go build -trimpath -o bin/01agentd ./cmd/01agentd
 	go build -trimpath -o bin/01agent-eval ./cmd/01agent-eval
 	go build -trimpath -o bin/01agent-replay ./cmd/01agent-replay
+	GOOS=linux go build -trimpath -o bin/01agent-sandbox ./cmd/01agent-sandbox
 
 test:
 	go test ./...
@@ -25,7 +26,8 @@ verify:
 	go build -o bin/01agentd ./cmd/01agentd
 	go build -o bin/01agent-eval ./cmd/01agent-eval
 	go build -o bin/01agent-replay ./cmd/01agent-replay
+	GOOS=linux go build -o bin/01agent-sandbox ./cmd/01agent-sandbox
 	$(MAKE) eval
 
 clean:
-	rm -f bin/01agent bin/01agentd bin/01agent-eval bin/01agent-replay coverage.out
+	rm -f bin/01agent bin/01agentd bin/01agent-eval bin/01agent-replay bin/01agent-sandbox coverage.out

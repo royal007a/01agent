@@ -149,6 +149,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		RunID:           config.runID,
 		Store:           store,
 		Compactor:       compactor,
+		InputQueue:      store,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "01agent: initialize engine: %v\n", err)

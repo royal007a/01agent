@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	agentsandbox "github.com/royal007a/01agent/internal/sandbox"
 	"github.com/royal007a/01agent/internal/schema"
 )
 
@@ -17,7 +20,9 @@ const maximumCommandOutput = 64 << 10
 
 type BashTool struct {
 	workDir string
+	tempDir string
 	shell   string
+	sandbox agentsandbox.Backend
 }
 
 type bashArgs struct {
@@ -26,6 +31,17 @@ type bashArgs struct {
 }
 
 func NewBashTool(workDir string) (*BashTool, error) {
+	backend, err := agentsandbox.Auto()
+	if err != nil {
+		return nil, err
+	}
+	return NewBashToolWithSandbox(workDir, backend)
+}
+
+func NewBashToolWithSandbox(workDir string, backend agentsandbox.Backend) (*BashTool, error) {
+	if backend == nil {
+		return nil, fmt.Errorf("bash sandbox backend is required")
+	}
 	abs, err := filepath.Abs(workDir)
 	if err != nil {
 		return nil, err
@@ -34,18 +50,22 @@ func NewBashTool(workDir string) (*BashTool, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("bash workspace must be a directory")
 	}
+	tempDir := filepath.Join(abs, ".01agent-tmp")
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create sandbox temporary directory: %w", err)
+	}
 	shell, err := exec.LookPath("bash")
 	if err != nil {
 		return nil, fmt.Errorf("bash executable is required: %w", err)
 	}
-	return &BashTool{workDir: abs, shell: shell}, nil
+	return &BashTool{workDir: abs, tempDir: tempDir, shell: shell, sandbox: backend}, nil
 }
 
 func (t *BashTool) Name() string { return "bash" }
 
 func (t *BashTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
-		Name: t.Name(), Description: "Run a Bash command in the workspace. This tool is dangerous and requires explicit per-run approval.",
+		Name: t.Name(), Description: "Run a Bash command in a platform sandbox confined to the workspace with networking denied. This tool is dangerous and requires explicit per-run approval.",
 		InputSchema: map[string]any{
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{
@@ -80,13 +100,17 @@ func (t *BashTool) Execute(ctx context.Context, arguments json.RawMessage) (stri
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	command := exec.CommandContext(commandCtx, t.shell, "--noprofile", "--norc", "-c", input.Command)
-	command.Dir = t.workDir
-	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8", "TMPDIR=" + os.TempDir()}
+	command, err := t.sandbox.Command(commandCtx, agentsandbox.Request{
+		Executable: t.shell, Arguments: []string{"--noprofile", "--norc", "-c", input.Command},
+		WorkDir: t.workDir, Env: []string{"PATH=/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8", "TMPDIR=" + t.tempDir},
+	})
+	if err != nil {
+		return "", &Error{Code: "sandbox_unavailable", Message: err.Error(), Fatal: true}
+	}
 	output := &cappedBuffer{limit: maximumCommandOutput}
 	command.Stdout = output
 	command.Stderr = output
-	err := command.Run()
+	err = command.Run()
 	if commandCtx.Err() != nil {
 		return "", commandCtx.Err()
 	}
@@ -95,6 +119,10 @@ func (t *BashTool) Execute(ctx context.Context, arguments json.RawMessage) (stri
 		result += "\n...[output truncated]..."
 	}
 	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 126 && strings.Contains(output.String(), "01agent-sandbox:") {
+			return "", &Error{Code: "sandbox_unavailable", Message: strings.TrimSpace(output.String()), Fatal: true}
+		}
 		return result, &Error{Code: "command_failed", Message: result, Retryable: true}
 	}
 	return result, nil

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/royal007a/01agent/internal/provider"
@@ -33,20 +34,25 @@ type Config struct {
 	RunID           string
 	Store           RunStore
 	Compactor       ContextCompactor
+	InputQueue      InputQueue
 }
 
 type EventType string
 
 const (
-	EventTurnStarted EventType = "turn_started"
-	EventRunStarted  EventType = "run_started"
-	EventThinking    EventType = "thinking"
-	EventAssistant   EventType = "assistant"
-	EventToolStarted EventType = "tool_started"
-	EventToolResult  EventType = "tool_result"
-	EventCompacted   EventType = "context_compacted"
-	EventCheckpoint  EventType = "checkpoint"
-	EventCompleted   EventType = "completed"
+	EventTurnStarted  EventType = "turn_started"
+	EventRunStarted   EventType = "run_started"
+	EventCapability   EventType = "capability_snapshotted"
+	EventThinking     EventType = "thinking"
+	EventAssistant    EventType = "assistant"
+	EventToolStarted  EventType = "tool_started"
+	EventToolResult   EventType = "tool_result"
+	EventCompacted    EventType = "context_compacted"
+	EventCheckpoint   EventType = "checkpoint"
+	EventCommitted    EventType = "history_committed"
+	EventInputClaimed EventType = "input_claimed"
+	EventInputAcked   EventType = "input_acknowledged"
+	EventCompleted    EventType = "completed"
 )
 
 type Event struct {
@@ -64,24 +70,57 @@ type Event struct {
 }
 
 type Checkpoint struct {
-	Version       int                   `json:"version"`
-	RunID         string                `json:"run_id"`
-	Prompt        string                `json:"prompt"`
-	WorkDir       string                `json:"work_dir"`
-	Messages      []schema.Message      `json:"messages"`
-	Turn          int                   `json:"turn"`
-	Usage         schema.Usage          `json:"usage"`
-	Reason        schema.TerminalReason `json:"reason,omitempty"`
-	RepeatedCalls map[string]int        `json:"repeated_calls,omitempty"`
-	Sequence      int                   `json:"sequence"`
-	UpdatedAt     time.Time             `json:"updated_at"`
+	Version              int                      `json:"version"`
+	RunID                string                   `json:"run_id"`
+	TurnID               string                   `json:"turn_id"`
+	Admission            int                      `json:"admission"`
+	LeaseID              string                   `json:"lease_id"`
+	Prompt               string                   `json:"prompt"`
+	WorkDir              string                   `json:"work_dir"`
+	Capability           tools.CapabilityRevision `json:"capability"`
+	Messages             []schema.Message         `json:"messages"`
+	Turn                 int                      `json:"turn"`
+	Usage                schema.Usage             `json:"usage"`
+	Reason               schema.TerminalReason    `json:"reason,omitempty"`
+	RepeatedCalls        map[string]int           `json:"repeated_calls,omitempty"`
+	Sequence             int                      `json:"sequence"`
+	OperationSequence    int                      `json:"operation_sequence"`
+	HistoryRevision      int64                    `json:"history_revision"`
+	LastOperationID      string                   `json:"last_operation_id,omitempty"`
+	LastFingerprint      string                   `json:"last_fingerprint,omitempty"`
+	CommittedInputClaims map[string]int64         `json:"committed_input_claims,omitempty"`
+	UpdatedAt            time.Time                `json:"updated_at"`
+}
+
+type HistoryCommit struct {
+	RunID            string     `json:"run_id"`
+	OperationID      string     `json:"operation_id"`
+	Fingerprint      string     `json:"fingerprint"`
+	ExpectedRevision int64      `json:"expected_revision"`
+	Checkpoint       Checkpoint `json:"checkpoint"`
+}
+
+type HistoryAck struct {
+	RunID       string    `json:"run_id"`
+	OperationID string    `json:"operation_id"`
+	Fingerprint string    `json:"fingerprint"`
+	Revision    int64     `json:"revision"`
+	CommittedAt time.Time `json:"committed_at"`
 }
 
 type RunStore interface {
 	Record(context.Context, Event) error
-	SaveCheckpoint(context.Context, Checkpoint) error
+	CommitHistory(context.Context, HistoryCommit) (HistoryAck, error)
 	Complete(context.Context, RunResult) error
 	LoadCheckpoint(context.Context, string) (Checkpoint, error)
+}
+
+// EventSequenceReader lets a resumed admission continue after trace records
+// that were durably appended after the last canonical checkpoint. Those
+// records are observations, not committed history, but their sequence numbers
+// must never be reused.
+type EventSequenceReader interface {
+	LastEventSequence(context.Context, string) (int, error)
 }
 
 type ContextCompactor interface {
@@ -89,15 +128,19 @@ type ContextCompactor interface {
 }
 
 type RunResult struct {
-	RunID        string                `json:"run_id"`
-	Reason       schema.TerminalReason `json:"reason"`
-	FinalMessage schema.Message        `json:"final_message"`
-	Messages     []schema.Message      `json:"messages"`
-	Turns        int                   `json:"turns"`
-	Usage        schema.Usage          `json:"usage"`
-	StartedAt    time.Time             `json:"started_at"`
-	CompletedAt  time.Time             `json:"completed_at"`
-	DurationMS   int64                 `json:"duration_ms"`
+	RunID           string                   `json:"run_id"`
+	TurnID          string                   `json:"turn_id"`
+	Admission       int                      `json:"admission"`
+	Capability      tools.CapabilityRevision `json:"capability"`
+	HistoryRevision int64                    `json:"history_revision"`
+	Reason          schema.TerminalReason    `json:"reason"`
+	FinalMessage    schema.Message           `json:"final_message"`
+	Messages        []schema.Message         `json:"messages"`
+	Turns           int                      `json:"turns"`
+	Usage           schema.Usage             `json:"usage"`
+	StartedAt       time.Time                `json:"started_at"`
+	CompletedAt     time.Time                `json:"completed_at"`
+	DurationMS      int64                    `json:"duration_ms"`
 }
 
 type AgentEngine struct {
@@ -112,6 +155,9 @@ func New(model provider.LLMProvider, registry tools.Registry, config Config) (*A
 	}
 	if registry == nil {
 		return nil, errors.New("engine: registry is nil")
+	}
+	if config.InputQueue != nil && config.Store == nil {
+		return nil, errors.New("engine: input queue requires a durable run store")
 	}
 	if strings.TrimSpace(config.WorkDir) == "" {
 		return nil, errors.New("engine: workdir is required")
@@ -141,11 +187,11 @@ func (e *AgentEngine) Run(parent context.Context, userPrompt string) (RunResult,
 		{Role: schema.RoleSystem, Content: e.config.SystemPrompt + "\n\nWorkspace: " + e.config.WorkDir},
 		{Role: schema.RoleUser, Content: userPrompt},
 	}
-	return e.run(parent, userPrompt, messages, 0, 0, schema.Usage{}, nil)
+	return e.run(parent, userPrompt, messages, nil)
 }
 
 func (e *AgentEngine) Resume(parent context.Context, checkpoint Checkpoint) (RunResult, error) {
-	if checkpoint.Version != 1 || checkpoint.RunID == "" || checkpoint.Prompt == "" || checkpoint.WorkDir == "" || len(checkpoint.Messages) < 2 {
+	if checkpoint.Version != 2 || checkpoint.RunID == "" || checkpoint.TurnID == "" || checkpoint.Prompt == "" || checkpoint.WorkDir == "" || len(checkpoint.Messages) < 2 {
 		return RunResult{}, errors.New("engine: invalid checkpoint")
 	}
 	if filepath.Clean(checkpoint.WorkDir) != e.config.WorkDir {
@@ -155,10 +201,10 @@ func (e *AgentEngine) Resume(parent context.Context, checkpoint Checkpoint) (Run
 		return RunResult{}, errors.New("engine: completed checkpoint cannot be resumed")
 	}
 	e.config.RunID = checkpoint.RunID
-	return e.run(parent, checkpoint.Prompt, append([]schema.Message(nil), checkpoint.Messages...), checkpoint.Turn, checkpoint.Sequence, checkpoint.Usage, checkpoint.RepeatedCalls)
+	return e.run(parent, checkpoint.Prompt, append([]schema.Message(nil), checkpoint.Messages...), &checkpoint)
 }
 
-func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []schema.Message, completedTurns, completedSequence int, usage schema.Usage, restored map[string]int) (RunResult, error) {
+func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []schema.Message, restored *Checkpoint) (RunResult, error) {
 	ctx := parent
 	cancel := func() {}
 	if e.config.Timeout > 0 {
@@ -170,10 +216,52 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	if runID == "" {
 		runID = newRunID()
 	}
+	runtime := e.registry.Snapshot()
+	capability := runtime.Revision()
+	turnID := newID("turn")
+	admission := 1
+	completedTurns := 0
+	completedSequence := 0
+	operationSequence := 0
+	historyRevision := int64(0)
+	usage := schema.Usage{}
+	var repeatedState map[string]int
+	committedInputClaims := make(map[string]int64)
+	if restored != nil {
+		if !restored.Capability.Equivalent(capability) {
+			return RunResult{}, fmt.Errorf("engine: capability revision changed: checkpoint=%s current=%s", restored.Capability.Digest, capability.Digest)
+		}
+		turnID = restored.TurnID
+		admission = restored.Admission + 1
+		completedTurns = restored.Turn
+		completedSequence = restored.Sequence
+		if reader, ok := e.config.Store.(EventSequenceReader); ok {
+			lastEventSequence, err := reader.LastEventSequence(context.WithoutCancel(ctx), restored.RunID)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("engine: load trace sequence: %w", err)
+			}
+			if lastEventSequence > completedSequence {
+				completedSequence = lastEventSequence
+			}
+		}
+		operationSequence = restored.OperationSequence
+		historyRevision = restored.HistoryRevision
+		usage = restored.Usage
+		repeatedState = restored.RepeatedCalls
+		for claimID, revision := range restored.CommittedInputClaims {
+			committedInputClaims[claimID] = revision
+		}
+	}
+	lease := newTurnLease(runID, turnID, newID("lease"), admission)
+	ctx = tools.WithExecutionLease(ctx, lease)
+	defer lease.Deactivate()
 	startedAt := time.Now().UTC()
-	result := RunResult{RunID: runID, Messages: messages, Usage: usage, StartedAt: startedAt}
+	result := RunResult{
+		RunID: runID, TurnID: turnID, Admission: admission, Capability: capability,
+		HistoryRevision: historyRevision, Messages: messages, Usage: usage, StartedAt: startedAt,
+	}
 	repeatedCalls := make(map[[32]byte]int)
-	for key, count := range restored {
+	for key, count := range repeatedState {
 		decoded, err := hex.DecodeString(key)
 		if err == nil && len(decoded) == sha256.Size {
 			var fingerprint [32]byte
@@ -199,26 +287,62 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		}
 		return nil
 	}
-	save := func(turn int) error {
+	commit := func(kind string, turn int, extraReservedEvents ...int) error {
 		if e.config.Store == nil {
 			return nil
+		}
+		reservedEvents := 1 // history_committed
+		if len(extraReservedEvents) > 0 && extraReservedEvents[0] > reservedEvents {
+			reservedEvents = extraReservedEvents[0]
 		}
 		encoded := make(map[string]int, len(repeatedCalls))
 		for fingerprint, count := range repeatedCalls {
 			encoded[fmt.Sprintf("%x", fingerprint)] = count
 		}
-		return e.config.Store.SaveCheckpoint(ctx, Checkpoint{
-			Version: 1, RunID: runID, Prompt: userPrompt, WorkDir: e.config.WorkDir,
+		operationSequence++
+		operationID := fmt.Sprintf("%s/op-%06d/%s", runID, operationSequence, kind)
+		checkpoint := Checkpoint{
+			Version: 2, RunID: runID, TurnID: turnID, Admission: admission, LeaseID: lease.ID,
+			Prompt: userPrompt, WorkDir: e.config.WorkDir, Capability: capability,
 			Messages: append([]schema.Message(nil), messages...), Turn: turn,
-			Usage: result.Usage, Reason: result.Reason, RepeatedCalls: encoded, Sequence: sequence, UpdatedAt: time.Now().UTC(),
+			// Reserve the trace events that follow this barrier. If append fails
+			// after the canonical commit, a resumed admission starts after the
+			// reserved values instead of reusing an event number.
+			Usage: result.Usage, Reason: result.Reason, RepeatedCalls: encoded, Sequence: sequence + reservedEvents,
+			OperationSequence: operationSequence, HistoryRevision: historyRevision, UpdatedAt: time.Now().UTC(),
+			CommittedInputClaims: cloneStringInt64Map(committedInputClaims),
+		}
+		fingerprint, err := historyFingerprint(kind, checkpoint)
+		if err != nil {
+			return err
+		}
+		checkpoint.LastOperationID = operationID
+		checkpoint.LastFingerprint = fingerprint
+		ack, err := e.config.Store.CommitHistory(context.WithoutCancel(ctx), HistoryCommit{
+			RunID: runID, OperationID: operationID, Fingerprint: fingerprint,
+			ExpectedRevision: historyRevision, Checkpoint: checkpoint,
 		})
+		if err != nil {
+			return err
+		}
+		if ack.RunID != runID || ack.OperationID != operationID || ack.Fingerprint != fingerprint || ack.Revision <= historyRevision {
+			return fmt.Errorf("engine: invalid history acknowledgement for %s", operationID)
+		}
+		historyRevision = ack.Revision
+		result.HistoryRevision = historyRevision
+		return emit(Event{Type: EventCommitted, Turn: turn, Metadata: map[string]any{
+			"operation_id": operationID, "fingerprint": fingerprint, "revision": historyRevision, "kind": kind,
+		}})
 	}
 	finish := func(reason schema.TerminalReason, err error) (RunResult, error) {
+		lease.Deactivate()
 		result.Reason = reason
 		result.Messages = append([]schema.Message(nil), messages...)
 		result.CompletedAt = time.Now().UTC()
 		result.DurationMS = result.CompletedAt.Sub(startedAt).Milliseconds()
-		if storeErr := save(result.Turns); storeErr != nil && err == nil {
+		// Reserve history_committed and completed so a later resume cannot
+		// reuse either trace sequence even if the process exits between them.
+		if storeErr := commit("terminal-"+string(reason), result.Turns, 2); storeErr != nil && err == nil {
 			result.Reason = schema.TerminalPersistenceError
 			err = storeErr
 		}
@@ -234,10 +358,22 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		}
 		return result, err
 	}
-	if err := save(completedTurns); err != nil {
+	if e.config.InputQueue != nil {
+		if err := e.config.InputQueue.Reconcile(context.WithoutCancel(ctx), runID, committedInputClaims); err != nil {
+			return finish(schema.TerminalPersistenceError, fmt.Errorf("reconcile input claims: %w", err))
+		}
+	}
+	if err := commit("admission", completedTurns); err != nil {
 		return finish(schema.TerminalPersistenceError, err)
 	}
-	if err := emit(Event{Type: EventRunStarted, Turn: completedTurns, Metadata: map[string]any{"resumed": completedTurns > 0}}); err != nil {
+	if err := emit(Event{Type: EventRunStarted, Turn: completedTurns, Metadata: map[string]any{
+		"resumed": restored != nil, "turn_id": turnID, "admission": admission, "lease_id": lease.ID,
+	}}); err != nil {
+		return finish(schema.TerminalPersistenceError, err)
+	}
+	if err := emit(Event{Type: EventCapability, Turn: completedTurns, Metadata: map[string]any{
+		"sequence": capability.Sequence, "digest": capability.Digest,
+	}}); err != nil {
 		return finish(schema.TerminalPersistenceError, err)
 	}
 
@@ -249,6 +385,40 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		if err := emit(Event{Type: EventTurnStarted, Turn: turn}); err != nil {
 			return finish(schema.TerminalPersistenceError, err)
 		}
+		if e.config.InputQueue != nil {
+			claim, err := e.config.InputQueue.Claim(ctx, runID, turnID, 32)
+			if err != nil {
+				return finish(schema.TerminalPersistenceError, fmt.Errorf("claim queued inputs: %w", err))
+			}
+			if claim.ID != "" {
+				if err := emit(Event{Type: EventInputClaimed, Turn: turn, Metadata: map[string]any{
+					"claim_id": claim.ID, "items": len(claim.Items),
+				}}); err != nil {
+					_ = e.config.InputQueue.Release(context.WithoutCancel(ctx), claim.ID)
+					return finish(schema.TerminalPersistenceError, err)
+				}
+				for _, input := range claim.Items {
+					messages = append(messages, schema.Message{
+						Role: schema.RoleUser, Content: formatQueuedInput(input),
+					})
+				}
+				committedInputClaims[claim.ID] = historyRevision + 1
+				if err := commit(fmt.Sprintf("step-%d-input-claim", turn), turn-1); err != nil {
+					delete(committedInputClaims, claim.ID)
+					_ = e.config.InputQueue.Release(context.WithoutCancel(ctx), claim.ID)
+					return finish(schema.TerminalPersistenceError, err)
+				}
+				committedInputClaims[claim.ID] = historyRevision
+				if err := e.config.InputQueue.Ack(context.WithoutCancel(ctx), claim.ID, historyRevision); err != nil {
+					return finish(schema.TerminalPersistenceError, fmt.Errorf("ack queued inputs: %w", err))
+				}
+				if err := emit(Event{Type: EventInputAcked, Turn: turn, Metadata: map[string]any{
+					"claim_id": claim.ID, "history_revision": historyRevision,
+				}}); err != nil {
+					return finish(schema.TerminalPersistenceError, err)
+				}
+			}
+		}
 
 		if e.config.Compactor != nil {
 			compacted, changed, err := e.config.Compactor.Compact(ctx, messages)
@@ -259,6 +429,9 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 				before := len(messages)
 				messages = compacted
 				if err := emit(Event{Type: EventCompacted, Turn: turn, Metadata: map[string]any{"messages_before": before, "messages_after": len(messages)}}); err != nil {
+					return finish(schema.TerminalPersistenceError, err)
+				}
+				if err := commit(fmt.Sprintf("step-%d-compaction", turn), turn-1); err != nil {
 					return finish(schema.TerminalPersistenceError, err)
 				}
 			}
@@ -286,10 +459,13 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 				if err := emit(Event{Type: EventThinking, Turn: turn, Message: thinking.Message}); err != nil {
 					return finish(schema.TerminalPersistenceError, err)
 				}
+				if err := commit(fmt.Sprintf("step-%d-thinking", turn), turn-1); err != nil {
+					return finish(schema.TerminalPersistenceError, err)
+				}
 			}
 		}
 
-		generation, err := e.provider.Generate(ctx, messages, e.registry.GetAvailableTools())
+		generation, err := e.provider.Generate(ctx, messages, runtime.GetAvailableTools())
 		if err != nil {
 			reason := schema.TerminalProviderError
 			if mapped := contextReasonFromError(err); mapped != "" {
@@ -301,6 +477,9 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		messages = append(messages, generation.Message)
 		result.Usage.Add(generation.Usage)
 		if err := emit(Event{Type: EventAssistant, Turn: turn, Message: generation.Message}); err != nil {
+			return finish(schema.TerminalPersistenceError, err)
+		}
+		if err := commit(fmt.Sprintf("step-%d-assistant", turn), turn-1); err != nil {
 			return finish(schema.TerminalPersistenceError, err)
 		}
 
@@ -336,7 +515,7 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 			}
 		}
 
-		toolResults := e.registry.ExecuteBatch(ctx, generation.Message.ToolCalls)
+		toolResults := runtime.ExecuteBatch(ctx, generation.Message.ToolCalls)
 		for _, toolResult := range toolResults {
 			messages = append(messages, schema.Message{
 				Role:       schema.RoleTool,
@@ -365,7 +544,7 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 				return finish(result.Reason, nil)
 			}
 		}
-		if err := save(turn); err != nil {
+		if err := commit(fmt.Sprintf("step-%d-tool-results", turn), turn); err != nil {
 			return finish(schema.TerminalPersistenceError, err)
 		}
 		if err := emit(Event{Type: EventCheckpoint, Turn: turn}); err != nil {
@@ -390,11 +569,76 @@ func (e *AgentEngine) overBudget(usage schema.Usage) bool {
 }
 
 func newRunID() string {
+	return newID("run")
+}
+
+func newID(prefix string) string {
 	var value [12]byte
 	if _, err := rand.Read(value[:]); err == nil {
-		return fmt.Sprintf("run-%x", value[:])
+		return fmt.Sprintf("%s-%x", prefix, value[:])
 	}
-	return fmt.Sprintf("run-%d", time.Now().UnixNano())
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+type turnLease struct {
+	mu        sync.RWMutex
+	RunID     string
+	TurnID    string
+	ID        string
+	Admission int
+	active    bool
+}
+
+func newTurnLease(runID, turnID, leaseID string, admission int) *turnLease {
+	return &turnLease{RunID: runID, TurnID: turnID, ID: leaseID, Admission: admission, active: true}
+}
+
+func (l *turnLease) Validate() error {
+	l.mu.RLock()
+	active := l.active
+	l.mu.RUnlock()
+	if !active {
+		return tools.ErrStaleExecutionLease
+	}
+	return nil
+}
+
+func (l *turnLease) Deactivate() {
+	l.mu.Lock()
+	l.active = false
+	l.mu.Unlock()
+}
+
+func historyFingerprint(kind string, checkpoint Checkpoint) (string, error) {
+	// Volatile commit metadata must not influence semantic identity.
+	checkpoint.UpdatedAt = time.Time{}
+	checkpoint.HistoryRevision = 0
+	checkpoint.LastOperationID = ""
+	checkpoint.LastFingerprint = ""
+	encoded, err := json.Marshal(struct {
+		Kind       string     `json:"kind"`
+		Checkpoint Checkpoint `json:"checkpoint"`
+	}{Kind: kind, Checkpoint: checkpoint})
+	if err != nil {
+		return "", fmt.Errorf("engine: encode history fingerprint: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func cloneStringInt64Map(input map[string]int64) map[string]int64 {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]int64, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func formatQueuedInput(input QueuedInput) string {
+	return fmt.Sprintf("[queued %s id=%s]\n%s", input.Kind, input.ID, input.Content)
 }
 
 func toolFingerprint(call schema.ToolCall) [32]byte {

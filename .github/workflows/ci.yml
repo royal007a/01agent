@@ -31,5 +31,6 @@ jobs:
         run: |
           go build -o /tmp/01agent-eval ./cmd/01agent-eval
           go build -o /tmp/01agent-replay ./cmd/01agent-replay
+          GOOS=linux go build -o /tmp/01agent-sandbox ./cmd/01agent-sandbox
       - name: Run deterministic evaluation gate
         run: go run ./cmd/01agent-eval --suite evals/runtime.json --artifacts /tmp/01agent-eval-artifacts --report /tmp/01agent-eval-artifacts/report.json

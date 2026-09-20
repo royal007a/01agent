@@ -201,6 +201,26 @@
         {"content": "bash verified"}
       ],
       "expected": {"reason": "completed", "answer_contains": "verified", "tool_sequence": ["bash"], "min_turns": 2, "max_turns": 2}
+    },
+    {
+      "id": "canonical-commit-barrier",
+      "prompt": "Finish only after durable history acknowledgement.",
+      "script": [{"content": "durably committed"}],
+      "expected": {"reason": "completed", "answer_contains": "committed", "tool_sequence": [], "min_turns": 1, "max_turns": 1, "min_history_commits": 3}
+    },
+    {
+      "id": "queued-user-steer",
+      "prompt": "Honor queued user input.",
+      "inputs": [{"id": "steer-eval", "kind": "user_steer", "content": "also update the tests"}],
+      "script": [{"content": "steer consumed"}],
+      "expected": {"reason": "completed", "answer_contains": "consumed", "tool_sequence": [], "min_input_claims": 1, "min_history_commits": 4}
+    },
+    {
+      "id": "queued-task-result",
+      "prompt": "Use the completed child task result.",
+      "inputs": [{"id": "task-eval", "kind": "task_result", "content": "{\"task_id\":\"task-eval\",\"state\":\"succeeded\",\"output\":\"callers safe\"}"}],
+      "script": [{"content": "task result consumed"}],
+      "expected": {"reason": "completed", "answer_contains": "consumed", "tool_sequence": [], "min_input_claims": 1, "min_history_commits": 4}
     }
   ]
 }

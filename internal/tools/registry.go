@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +16,27 @@ import (
 )
 
 type Registry interface {
+	Runtime
 	Register(tool BaseTool) error
+	Snapshot() Runtime
+}
+
+// Runtime is an immutable view of the capabilities exposed to one accepted
+// agent turn. Definitions and dispatch always use the same physical tool set.
+type Runtime interface {
+	Revision() CapabilityRevision
 	GetAvailableTools() []schema.ToolDefinition
 	Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
 	ExecuteBatch(ctx context.Context, calls []schema.ToolCall) []schema.ToolResult
+}
+
+type CapabilityRevision struct {
+	Sequence uint64 `json:"sequence"`
+	Digest   string `json:"digest"`
+}
+
+func (r CapabilityRevision) Equivalent(other CapabilityRevision) bool {
+	return r.Digest != "" && r.Digest == other.Digest
 }
 
 type RegistryOption func(*registryImpl)
@@ -53,6 +71,15 @@ type registryImpl struct {
 	policy      PermissionPolicy
 	maxParallel int
 	toolTimeout time.Duration
+	revision    CapabilityRevision
+}
+
+type runtimeSnapshot struct {
+	tools       map[string]BaseTool
+	policy      PermissionPolicy
+	maxParallel int
+	toolTimeout time.Duration
+	revision    CapabilityRevision
 }
 
 func NewRegistry(options ...RegistryOption) Registry {
@@ -65,6 +92,7 @@ func NewRegistry(options ...RegistryOption) Registry {
 	for _, option := range options {
 		option(r)
 	}
+	r.revision.Digest = capabilityDigest(r.tools)
 	return r
 }
 
@@ -90,7 +118,28 @@ func (r *registryImpl) Register(tool BaseTool) error {
 		return fmt.Errorf("register tool %q: duplicate name", name)
 	}
 	r.tools[name] = tool
+	r.revision.Sequence++
+	r.revision.Digest = capabilityDigest(r.tools)
 	return nil
+}
+
+func (r *registryImpl) Revision() CapabilityRevision {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.revision
+}
+
+func (r *registryImpl) Snapshot() Runtime {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	items := make(map[string]BaseTool, len(r.tools))
+	for name, tool := range r.tools {
+		items[name] = tool
+	}
+	return &runtimeSnapshot{
+		tools: items, policy: r.policy, maxParallel: r.maxParallel,
+		toolTimeout: r.toolTimeout, revision: r.revision,
+	}
 }
 
 func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
@@ -107,6 +156,17 @@ func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 	return definitions
 }
 
+func (r *runtimeSnapshot) Revision() CapabilityRevision { return r.revision }
+
+func (r *runtimeSnapshot) GetAvailableTools() []schema.ToolDefinition {
+	definitions := make([]schema.ToolDefinition, 0, len(r.tools))
+	for _, tool := range r.tools {
+		definitions = append(definitions, tool.Definition())
+	}
+	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Name < definitions[j].Name })
+	return definitions
+}
+
 func (r *registryImpl) lookup(name string) (BaseTool, bool) {
 	r.mu.RLock()
 	tool, ok := r.tools[name]
@@ -114,12 +174,25 @@ func (r *registryImpl) lookup(name string) (BaseTool, bool) {
 	return tool, ok
 }
 
+func (r *runtimeSnapshot) lookup(name string) (BaseTool, bool) {
+	tool, ok := r.tools[name]
+	return tool, ok
+}
+
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	return execute(ctx, call, r.lookup, r.policy, r.toolTimeout)
+}
+
+func (r *runtimeSnapshot) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	return execute(ctx, call, r.lookup, r.policy, r.toolTimeout)
+}
+
+func execute(ctx context.Context, call schema.ToolCall, lookup func(string) (BaseTool, bool), policy PermissionPolicy, toolTimeout time.Duration) schema.ToolResult {
 	if err := ctx.Err(); err != nil {
 		return contextResult(call.ID, err)
 	}
 
-	tool, exists := r.lookup(call.Name)
+	tool, exists := lookup(call.Name)
 	if !exists {
 		return errorResult(call.ID, "unknown_tool", fmt.Sprintf("tool %q is not registered", call.Name), true, false)
 	}
@@ -135,7 +208,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		return errorResult(call.ID, "argument_validation", err.Error(), true, false)
 	}
 
-	decision := r.policy.CanUse(ctx, definition, call.Arguments)
+	decision := policy.CanUse(ctx, definition, call.Arguments)
 	if !decision.Allowed {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
@@ -147,11 +220,20 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		}
 		return errorResult(call.ID, code, reason, false, true)
 	}
+	// Authorization may involve an external approval and outlive the Turn that
+	// requested it. Recheck cancellation and the Turn lease after approval but
+	// before invoking any physical side effect.
+	if err := ctx.Err(); err != nil {
+		return contextResult(call.ID, err)
+	}
+	if err := ValidateExecutionLease(ctx); err != nil {
+		return errorResult(call.ID, "stale_lease", err.Error(), false, true)
+	}
 
 	toolCtx := ctx
 	cancel := func() {}
-	if r.toolTimeout > 0 {
-		toolCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
+	if toolTimeout > 0 {
+		toolCtx, cancel = context.WithTimeout(ctx, toolTimeout)
 	}
 	defer cancel()
 
@@ -171,13 +253,21 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 }
 
 func (r *registryImpl) ExecuteBatch(ctx context.Context, calls []schema.ToolCall) []schema.ToolResult {
+	return executeBatch(ctx, calls, r.Execute, r.canRunInParallel, r.maxParallel)
+}
+
+func (r *runtimeSnapshot) ExecuteBatch(ctx context.Context, calls []schema.ToolCall) []schema.ToolResult {
+	return executeBatch(ctx, calls, r.Execute, r.canRunInParallel, r.maxParallel)
+}
+
+func executeBatch(ctx context.Context, calls []schema.ToolCall, executeOne func(context.Context, schema.ToolCall) schema.ToolResult, canParallel func([]schema.ToolCall) bool, maxParallel int) []schema.ToolResult {
 	results := make([]schema.ToolResult, len(calls))
 	if len(calls) == 0 {
 		return results
 	}
-	if !r.canRunInParallel(calls) {
+	if !canParallel(calls) {
 		for i, call := range calls {
-			results[i] = r.Execute(ctx, call)
+			results[i] = executeOne(ctx, call)
 			if results[i].Fatal {
 				for j := i + 1; j < len(calls); j++ {
 					results[j] = errorResult(calls[j].ID, "batch_cancelled", "not executed after a fatal tool result", false, true)
@@ -188,7 +278,7 @@ func (r *registryImpl) ExecuteBatch(ctx context.Context, calls []schema.ToolCall
 		return results
 	}
 
-	semaphore := make(chan struct{}, r.maxParallel)
+	semaphore := make(chan struct{}, maxParallel)
 	var wait sync.WaitGroup
 	for i, call := range calls {
 		wait.Add(1)
@@ -197,7 +287,7 @@ func (r *registryImpl) ExecuteBatch(ctx context.Context, calls []schema.ToolCall
 			select {
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
-				results[index] = r.Execute(ctx, item)
+				results[index] = executeOne(ctx, item)
 			case <-ctx.Done():
 				results[index] = contextResult(item.ID, ctx.Err())
 			}
@@ -208,11 +298,19 @@ func (r *registryImpl) ExecuteBatch(ctx context.Context, calls []schema.ToolCall
 }
 
 func (r *registryImpl) canRunInParallel(calls []schema.ToolCall) bool {
-	if len(calls) < 2 || r.maxParallel < 2 {
+	return canRunInParallel(calls, r.lookup, r.maxParallel)
+}
+
+func (r *runtimeSnapshot) canRunInParallel(calls []schema.ToolCall) bool {
+	return canRunInParallel(calls, r.lookup, r.maxParallel)
+}
+
+func canRunInParallel(calls []schema.ToolCall, lookup func(string) (BaseTool, bool), maxParallel int) bool {
+	if len(calls) < 2 || maxParallel < 2 {
 		return false
 	}
 	for _, call := range calls {
-		tool, exists := r.lookup(call.Name)
+		tool, exists := lookup(call.Name)
 		if !exists {
 			return false
 		}
@@ -222,6 +320,17 @@ func (r *registryImpl) canRunInParallel(calls []schema.ToolCall) bool {
 		}
 	}
 	return true
+}
+
+func capabilityDigest(items map[string]BaseTool) string {
+	definitions := make([]schema.ToolDefinition, 0, len(items))
+	for _, tool := range items {
+		definitions = append(definitions, tool.Definition())
+	}
+	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Name < definitions[j].Name })
+	encoded, _ := json.Marshal(definitions)
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func validateSchema(inputSchema map[string]any, arguments json.RawMessage) error {

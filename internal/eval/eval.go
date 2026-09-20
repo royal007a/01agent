@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
+	agentsandbox "github.com/royal007a/01agent/internal/sandbox"
 	"github.com/royal007a/01agent/internal/schema"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -28,20 +30,21 @@ type Suite struct {
 }
 
 type Case struct {
-	ID              string            `json:"id"`
-	Prompt          string            `json:"prompt"`
-	Files           map[string]string `json:"files,omitempty"`
-	EnableDangerous bool              `json:"enable_dangerous,omitempty"`
-	ApprovedTools   []string          `json:"approved_tools,omitempty"`
-	Script          []ScriptStep      `json:"script"`
-	RepeatLast      bool              `json:"repeat_last,omitempty"`
-	Thinking        bool              `json:"thinking,omitempty"`
-	MaxTurns        int               `json:"max_turns,omitempty"`
-	MaxTokens       int64             `json:"max_tokens,omitempty"`
-	MaxRepeatedCall int               `json:"max_repeated_call,omitempty"`
-	TimeoutMS       int               `json:"timeout_ms,omitempty"`
-	ContextTokens   int               `json:"context_tokens,omitempty"`
-	Expected        Expected          `json:"expected"`
+	ID              string               `json:"id"`
+	Prompt          string               `json:"prompt"`
+	Files           map[string]string    `json:"files,omitempty"`
+	Inputs          []engine.QueuedInput `json:"inputs,omitempty"`
+	EnableDangerous bool                 `json:"enable_dangerous,omitempty"`
+	ApprovedTools   []string             `json:"approved_tools,omitempty"`
+	Script          []ScriptStep         `json:"script"`
+	RepeatLast      bool                 `json:"repeat_last,omitempty"`
+	Thinking        bool                 `json:"thinking,omitempty"`
+	MaxTurns        int                  `json:"max_turns,omitempty"`
+	MaxTokens       int64                `json:"max_tokens,omitempty"`
+	MaxRepeatedCall int                  `json:"max_repeated_call,omitempty"`
+	TimeoutMS       int                  `json:"timeout_ms,omitempty"`
+	ContextTokens   int                  `json:"context_tokens,omitempty"`
+	Expected        Expected             `json:"expected"`
 }
 
 type ScriptStep struct {
@@ -53,12 +56,14 @@ type ScriptStep struct {
 }
 
 type Expected struct {
-	Reason         schema.TerminalReason `json:"reason"`
-	AnswerContains string                `json:"answer_contains,omitempty"`
-	ToolSequence   []string              `json:"tool_sequence,omitempty"`
-	MinTurns       int                   `json:"min_turns,omitempty"`
-	MaxTurns       int                   `json:"max_turns,omitempty"`
-	MinCompactions int                   `json:"min_compactions,omitempty"`
+	Reason            schema.TerminalReason `json:"reason"`
+	AnswerContains    string                `json:"answer_contains,omitempty"`
+	ToolSequence      []string              `json:"tool_sequence,omitempty"`
+	MinTurns          int                   `json:"min_turns,omitempty"`
+	MaxTurns          int                   `json:"max_turns,omitempty"`
+	MinCompactions    int                   `json:"min_compactions,omitempty"`
+	MinHistoryCommits int                   `json:"min_history_commits,omitempty"`
+	MinInputClaims    int                   `json:"min_input_claims,omitempty"`
 }
 
 type CaseResult struct {
@@ -171,6 +176,13 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	if err != nil {
 		return CaseResult{}, err
 	}
+	runID := fmt.Sprintf("eval-%s-%d", item.ID, time.Now().UnixNano())
+	for _, input := range item.Inputs {
+		input.RunID = runID
+		if _, err := store.Enqueue(ctx, input); err != nil {
+			return CaseResult{}, err
+		}
+	}
 	defer os.RemoveAll(workDir)
 	for name, content := range item.Files {
 		path := filepath.Join(workDir, filepath.Clean(name))
@@ -206,7 +218,7 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		if err != nil {
 			return CaseResult{}, err
 		}
-		bashTool, err := tools.NewBashTool(workDir)
+		bashTool, err := tools.NewBashToolWithSandbox(workDir, evaluatorSandbox{})
 		if err != nil {
 			return CaseResult{}, err
 		}
@@ -220,7 +232,7 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	config := engine.Config{
 		WorkDir: workDir, EnableThinking: item.Thinking, MaxTurns: item.MaxTurns,
 		MaxTokens: item.MaxTokens, MaxRepeatedCall: item.MaxRepeatedCall,
-		Timeout: time.Duration(item.TimeoutMS) * time.Millisecond, Store: store,
+		Timeout: time.Duration(item.TimeoutMS) * time.Millisecond, Store: store, InputQueue: store, RunID: runID,
 	}
 	if item.ContextTokens > 0 {
 		config.Compactor = contextmanager.Window{MaxApproxTokens: item.ContextTokens, ReserveTokens: item.ContextTokens / 5, MinTailMessages: 2}
@@ -240,12 +252,20 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	}
 	actualTools := make([]string, 0)
 	compactions := 0
+	historyCommits := 0
+	inputClaims := 0
 	for _, event := range trace.Events {
 		if event.Type == engine.EventToolStarted {
 			actualTools = append(actualTools, event.ToolCall.Name)
 		}
 		if event.Type == engine.EventCompacted {
 			compactions++
+		}
+		if event.Type == engine.EventCommitted {
+			historyCommits++
+		}
+		if event.Type == engine.EventInputAcked {
+			inputClaims++
 		}
 	}
 	failures := make([]string, 0)
@@ -268,6 +288,12 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	if compactions < item.Expected.MinCompactions {
 		failures = append(failures, fmt.Sprintf("compactions=%d below %d", compactions, item.Expected.MinCompactions))
 	}
+	if historyCommits < item.Expected.MinHistoryCommits {
+		failures = append(failures, fmt.Sprintf("history_commits=%d below %d", historyCommits, item.Expected.MinHistoryCommits))
+	}
+	if inputClaims < item.Expected.MinInputClaims {
+		failures = append(failures, fmt.Sprintf("input_claims=%d below %d", inputClaims, item.Expected.MinInputClaims))
+	}
 	cost := float64(result.Usage.InputTokens)*suite.InputUSDPerMillion/1_000_000 + float64(result.Usage.OutputTokens)*suite.OutputUSDPerMillion/1_000_000
 	caseResult := CaseResult{
 		ID: item.ID, Passed: len(failures) == 0, Failures: failures, Reason: result.Reason,
@@ -280,6 +306,19 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		caseResult.RunError = runErr.Error()
 	}
 	return caseResult, nil
+}
+
+// evaluatorSandbox isolates the deterministic harness test from host sandbox
+// availability. Platform sandbox enforcement has dedicated integration tests.
+type evaluatorSandbox struct{}
+
+func (evaluatorSandbox) Name() string { return "evaluator" }
+
+func (evaluatorSandbox) Command(ctx context.Context, request agentsandbox.Request) (*exec.Cmd, error) {
+	command := exec.CommandContext(ctx, request.Executable, request.Arguments...)
+	command.Dir = request.WorkDir
+	command.Env = append([]string(nil), request.Env...)
+	return command, nil
 }
 
 type scriptedProvider struct {

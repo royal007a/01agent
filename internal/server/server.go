@@ -15,6 +15,7 @@ import (
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/schema"
+	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
 
@@ -34,6 +35,9 @@ type Config struct {
 	MaxConcurrent    int
 	Store            engine.RunStore
 	Compactor        engine.ContextCompactor
+	InputQueue       engine.InputQueue
+	InputEnqueuer    engine.InputEnqueuer
+	Tasks            *taskstore.Store
 	ReadinessTTL     time.Duration
 	ReadinessTimeout time.Duration
 }
@@ -48,10 +52,31 @@ type Handler struct {
 }
 
 type runRequest struct {
+	RunID         string   `json:"run_id,omitempty"`
 	Prompt        string   `json:"prompt"`
 	Thinking      *bool    `json:"thinking,omitempty"`
 	ResumeRunID   string   `json:"resume_run_id,omitempty"`
 	ApprovedTools []string `json:"approved_tools,omitempty"`
+}
+
+type enqueueRequest struct {
+	ID      string           `json:"id,omitempty"`
+	Kind    engine.InputKind `json:"kind,omitempty"`
+	Content string           `json:"content"`
+}
+
+type createTaskRequest struct {
+	ID           string `json:"id,omitempty"`
+	ParentRunID  string `json:"parent_run_id"`
+	ParentTurnID string `json:"parent_turn_id,omitempty"`
+	Title        string `json:"title"`
+}
+
+type taskEventRequest struct {
+	Action  string `json:"action"`
+	OwnerID string `json:"owner_id,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Failure string `json:"failure,omitempty"`
 }
 
 type errorResponse struct {
@@ -90,6 +115,10 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.HandleFunc("GET /readyz", handler.ready)
 	handler.mux.HandleFunc("POST /v1/runs", handler.authorize(handler.run))
+	handler.mux.HandleFunc("POST /v1/runs/{runID}/inputs", handler.authorize(handler.enqueueInput))
+	handler.mux.HandleFunc("POST /v1/tasks", handler.authorize(handler.createTask))
+	handler.mux.HandleFunc("GET /v1/tasks/{taskID}", handler.authorize(handler.getTask))
+	handler.mux.HandleFunc("POST /v1/tasks/{taskID}/events", handler.authorize(handler.taskEvent))
 	return handler, nil
 }
 
@@ -148,6 +177,7 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	input.Prompt = strings.TrimSpace(input.Prompt)
+	input.RunID = strings.TrimSpace(input.RunID)
 	input.ResumeRunID = strings.TrimSpace(input.ResumeRunID)
 	if (input.Prompt == "") == (input.ResumeRunID == "") {
 		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "provide exactly one of prompt or resume_run_id"})
@@ -185,6 +215,8 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 		Timeout:         h.config.RunTimeout,
 		Store:           h.config.Store,
 		Compactor:       h.config.Compactor,
+		InputQueue:      h.config.InputQueue,
+		RunID:           input.RunID,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: err.Error()})
@@ -213,6 +245,123 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 		response["error"] = runErr.Error()
 	}
 	writeJSON(writer, status, response)
+}
+
+func (h *Handler) enqueueInput(writer http.ResponseWriter, request *http.Request) {
+	if h.config.InputEnqueuer == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "input queue is not configured"})
+		return
+	}
+	runID := strings.TrimSpace(request.PathValue("runID"))
+	if runID == "" || len(runID) > 128 {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "valid run id is required"})
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input enqueueRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "invalid JSON request: " + err.Error()})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "request body must contain exactly one JSON object"})
+		return
+	}
+	if input.Kind == "" {
+		input.Kind = engine.InputUserSteer
+	}
+	queued, err := h.config.InputEnqueuer.Enqueue(request.Context(), engine.QueuedInput{
+		ID: strings.TrimSpace(input.ID), RunID: runID, Kind: input.Kind, Content: input.Content,
+	})
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"input": queued})
+}
+
+func (h *Handler) createTask(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Tasks == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "background task store is not configured"})
+		return
+	}
+	var input createTaskRequest
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	task, err := h.config.Tasks.Create(request.Context(), taskstore.Task{
+		ID: input.ID, ParentRunID: input.ParentRunID, ParentTurnID: input.ParentTurnID, Title: input.Title,
+	})
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"task": task})
+}
+
+func (h *Handler) getTask(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Tasks == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "background task store is not configured"})
+		return
+	}
+	task, err := h.config.Tasks.Get(request.Context(), request.PathValue("taskID"))
+	if err != nil {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"task": task})
+}
+
+func (h *Handler) taskEvent(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Tasks == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "background task store is not configured"})
+		return
+	}
+	var input taskEventRequest
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	taskID := request.PathValue("taskID")
+	var task taskstore.Task
+	var err error
+	switch input.Action {
+	case "start":
+		task, err = h.config.Tasks.Start(request.Context(), taskID, input.OwnerID)
+	case "heartbeat":
+		task, err = h.config.Tasks.Heartbeat(request.Context(), taskID, input.OwnerID)
+	case "stop":
+		task, err = h.config.Tasks.RequestStop(request.Context(), taskID)
+	case "complete":
+		task, err = h.config.Tasks.Complete(request.Context(), taskID, input.OwnerID, input.Output)
+	case "fail":
+		task, err = h.config.Tasks.Fail(request.Context(), taskID, input.OwnerID, input.Failure)
+	case "cancel":
+		task, err = h.config.Tasks.Cancel(request.Context(), taskID)
+	default:
+		err = fmt.Errorf("unsupported task action %q", input.Action)
+	}
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"task": task})
+}
+
+func decodeRequest(writer http.ResponseWriter, request *http.Request, target any) error {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON request: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("request body must contain exactly one JSON object")
+	}
+	return nil
 }
 
 func (h *Handler) authorize(next http.HandlerFunc) http.HandlerFunc {

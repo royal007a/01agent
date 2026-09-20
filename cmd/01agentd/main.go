@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/runstore"
 	agentserver "github.com/royal007a/01agent/internal/server"
+	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
 
@@ -80,6 +82,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize run store: %w", err)
 	}
+	tasks, err := taskstore.New(filepath.Join(store.Dir(), "tasks"), store, store)
+	if err != nil {
+		return fmt.Errorf("initialize background task store: %w", err)
+	}
+	taskHeartbeatTimeout := envDuration("AGENT_TASK_HEARTBEAT_TIMEOUT", 2*time.Minute)
+	if err := reconcileTasks(context.Background(), tasks, taskHeartbeatTimeout); err != nil {
+		return fmt.Errorf("reconcile background tasks: %w", err)
+	}
 	var compactor engine.ContextCompactor
 	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
 		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5}
@@ -98,6 +108,9 @@ func run() error {
 		MaxConcurrent:    envInt("AGENT_MAX_CONCURRENT", 2),
 		Store:            store,
 		Compactor:        compactor,
+		InputQueue:       store,
+		InputEnqueuer:    store,
+		Tasks:            tasks,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),
 		ReadinessTimeout: envDuration("AGENT_READINESS_TIMEOUT", 10*time.Second),
 	})
@@ -116,6 +129,20 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
+		ticker := time.NewTicker(envDuration("AGENT_TASK_RECONCILE_INTERVAL", 30*time.Second))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := reconcileTasks(context.WithoutCancel(ctx), tasks, taskHeartbeatTimeout); err != nil {
+					log.Printf("background task reconciliation failed: %v", err)
+				}
+			}
+		}
+	}()
+	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -126,6 +153,16 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+func reconcileTasks(ctx context.Context, tasks *taskstore.Store, heartbeatTimeout time.Duration) error {
+	if _, err := tasks.ReconcileLost(ctx, time.Now().UTC(), heartbeatTimeout); err != nil {
+		return err
+	}
+	if err := tasks.DeliverPending(ctx); err != nil {
+		return err
+	}
+	return tasks.ReconcileConsumption(ctx)
 }
 
 func providerFromEnv() (provider.LLMProvider, error) {

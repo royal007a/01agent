@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,21 +44,67 @@ type fakeRegistry struct {
 	definitions []schema.ToolDefinition
 	result      func(schema.ToolCall) schema.ToolResult
 	calls       int
+	revision    string
 }
 
 type memoryStore struct {
 	checkpoint Checkpoint
 	events     []Event
 	result     RunResult
+	revision   int64
+}
+
+type memoryInputQueue struct {
+	claim       InputClaim
+	claimed     bool
+	acked       bool
+	ackRevision int64
+	reconciled  bool
+}
+
+func (q *memoryInputQueue) Claim(_ context.Context, runID, turnID string, _ int) (InputClaim, error) {
+	if q.claimed || len(q.claim.Items) == 0 {
+		return InputClaim{}, nil
+	}
+	q.claimed = true
+	q.claim.RunID = runID
+	q.claim.TurnID = turnID
+	if q.claim.ID == "" {
+		q.claim.ID = "claim-test"
+	}
+	return q.claim, nil
+}
+func (q *memoryInputQueue) Ack(_ context.Context, claimID string, revision int64) error {
+	if claimID != q.claim.ID {
+		return errors.New("wrong claim")
+	}
+	q.acked = true
+	q.ackRevision = revision
+	return nil
+}
+func (q *memoryInputQueue) Release(context.Context, string) error { return nil }
+func (q *memoryInputQueue) Reconcile(context.Context, string, map[string]int64) error {
+	q.reconciled = true
+	return nil
 }
 
 func (m *memoryStore) Record(_ context.Context, event Event) error {
 	m.events = append(m.events, event)
 	return nil
 }
-func (m *memoryStore) SaveCheckpoint(_ context.Context, checkpoint Checkpoint) error {
-	m.checkpoint = checkpoint
-	return nil
+func (m *memoryStore) CommitHistory(_ context.Context, commit HistoryCommit) (HistoryAck, error) {
+	if commit.ExpectedRevision != m.revision {
+		return HistoryAck{}, errors.New("revision conflict")
+	}
+	m.revision++
+	m.checkpoint = commit.Checkpoint
+	m.checkpoint.HistoryRevision = m.revision
+	m.checkpoint.LastOperationID = commit.OperationID
+	m.checkpoint.LastFingerprint = commit.Fingerprint
+	return HistoryAck{
+		RunID: commit.RunID, OperationID: commit.OperationID, Fingerprint: commit.Fingerprint,
+		Revision: m.revision, CommittedAt: time.Now(),
+	}, nil
 }
 func (m *memoryStore) Complete(_ context.Context, result RunResult) error {
 	m.result = result
@@ -66,8 +113,22 @@ func (m *memoryStore) Complete(_ context.Context, result RunResult) error {
 func (m *memoryStore) LoadCheckpoint(context.Context, string) (Checkpoint, error) {
 	return m.checkpoint, nil
 }
+func (m *memoryStore) LastEventSequence(context.Context, string) (int, error) {
+	if len(m.events) == 0 {
+		return 0, nil
+	}
+	return m.events[len(m.events)-1].Sequence, nil
+}
 
 func (f *fakeRegistry) Register(toolruntime.BaseTool) error { return nil }
+func (f *fakeRegistry) Revision() toolruntime.CapabilityRevision {
+	digest := f.revision
+	if digest == "" {
+		digest = "fake-capability"
+	}
+	return toolruntime.CapabilityRevision{Sequence: 1, Digest: digest}
+}
+func (f *fakeRegistry) Snapshot() toolruntime.Runtime { return f }
 func (f *fakeRegistry) GetAvailableTools() []schema.ToolDefinition {
 	return append([]schema.ToolDefinition(nil), f.definitions...)
 }
@@ -258,5 +319,67 @@ func TestRunCanResumeFromCheckpoint(t *testing.T) {
 	}
 	if resumed.Reason != schema.TerminalCompleted || resumed.Turns != 2 || resumed.RunID != "run-resume" || resumed.FinalMessage.Content != "resumed" {
 		t.Fatalf("resumed = %#v", resumed)
+	}
+	lastSequence := 0
+	for _, event := range store.events {
+		if event.Sequence <= lastSequence {
+			t.Fatalf("event sequence reused across resume: previous=%d current=%d event=%s", lastSequence, event.Sequence, event.Type)
+		}
+		lastSequence = event.Sequence
+	}
+}
+
+func TestResumeRejectsChangedCapabilitySnapshot(t *testing.T) {
+	store := &memoryStore{}
+	workDir := t.TempDir()
+	firstModel := &scriptedProvider{generations: []schema.Generation{{Message: schema.Message{Content: "done"}}}}
+	first, err := New(firstModel, newFakeRegistry(), Config{WorkDir: workDir, Store: store, RunID: "run-capability"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Run(context.Background(), "inspect"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := store.checkpoint
+	checkpoint.Reason = schema.TerminalProviderError
+	changed := newFakeRegistry()
+	changed.revision = "changed-capability"
+	second, err := New(&scriptedProvider{}, changed, Config{WorkDir: workDir, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Resume(context.Background(), checkpoint); err == nil || !strings.Contains(err.Error(), "capability revision changed") {
+		t.Fatalf("resume error=%v", err)
+	}
+}
+
+func TestQueuedInputIsCommittedBeforeAcknowledgement(t *testing.T) {
+	store := &memoryStore{}
+	queue := &memoryInputQueue{claim: InputClaim{Items: []QueuedInput{{ID: "input-1", Kind: InputUserSteer, Content: "new constraint"}}}}
+	model := &scriptedProvider{generations: []schema.Generation{{Message: schema.Message{Content: "done"}}}}
+	agent, err := New(model, newFakeRegistry(), Config{WorkDir: t.TempDir(), Store: store, InputQueue: queue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.Run(context.Background(), "original")
+	if err != nil || result.Reason != schema.TerminalCompleted {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !queue.reconciled || !queue.acked || queue.ackRevision <= 0 {
+		t.Fatalf("queue=%#v", queue)
+	}
+	if len(model.histories) != 1 || !strings.Contains(model.histories[0][len(model.histories[0])-1].Content, "new constraint") {
+		t.Fatalf("model history=%#v", model.histories)
+	}
+	if revision := store.checkpoint.CommittedInputClaims[queue.claim.ID]; revision <= 0 {
+		t.Fatalf("checkpoint did not retain committed claim: %#v", store.checkpoint)
+	}
+	claimed, acked := false, false
+	for _, event := range store.events {
+		claimed = claimed || event.Type == EventInputClaimed
+		acked = acked || event.Type == EventInputAcked
+	}
+	if !claimed || !acked {
+		t.Fatalf("claim events missing: %#v", store.events)
 	}
 }

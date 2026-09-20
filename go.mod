@@ -4,8 +4,10 @@ go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.72.0
+	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/openai/openai-go/v3 v3.61.0
 	github.com/xeipuuv/gojsonschema v1.2.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -22,4 +24,5 @@ require (
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/sync v0.16.0 // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )

@@ -47,7 +47,7 @@ minutes by default). `POST /v1/runs` requires
 
 The service limits request bodies, concurrent runs, total run time, turns,
 repeated calls, provider traffic, and tool duration. Persist `AGENT_RUN_DIR` so
-traces and checkpoints survive container replacement:
+traces, canonical history, inboxes, and task state survive container replacement:
 
 ```bash
 docker volume create 01agent-runs
@@ -62,15 +62,22 @@ docker run -d --name 01agent-http -p 8080:8080 \
 To resume, POST `{"resume_run_id":"run-..."}`. The checkpoint includes its
 workspace path; resume rejects a mismatch and rejects already completed runs.
 
+The daemon reconciles background tasks every `AGENT_TASK_RECONCILE_INTERVAL`
+(30 seconds by default). Running/stopping tasks whose heartbeat is older than
+`AGENT_TASK_HEARTBEAT_TIMEOUT` (two minutes by default) become `lost`; pending
+terminal delivery and parent-run consumption acknowledgements are also repaired.
+
 ## Dangerous-tool deployment
 
 Set `AGENT_ENABLE_DANGEROUS_TOOLS=true` only inside a disposable,
 least-privileged execution boundary and change the workspace mount to writable.
 Registration alone is insufficient: every HTTP run must also list the exact
 tools in `approved_tools`. Bash receives a minimal environment and bounded
-timeout/output, but it can invoke any binary and path visible inside the
-container. Do not mount Docker sockets, credentials, host roots, or unrelated
-data into that container.
+timeout/output. It invokes `/usr/local/bin/01agent-sandbox`, which requires
+Linux Landlock ABI V4 (Linux 6.8 satisfies this) and installs a seccomp filter
+that denies socket syscalls. Startup fails if the helper is unavailable, and
+execution fails closed if the kernel cannot install the policy. Do not mount
+Docker sockets, credentials, host roots, or unrelated data into that container.
 
 ## Rollback
 
