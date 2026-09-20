@@ -21,14 +21,15 @@
       "expected": {"reason": "completed", "answer_contains": "hello", "tool_sequence": ["read_file"], "min_turns": 2, "max_turns": 2}
     },
     {
-      "id": "read-nested",
-      "prompt": "Read nested/config.txt.",
-      "files": {"nested/config.txt": "nested value"},
+      "id": "isolated-readonly-subagent",
+      "prompt": "Delegate investigation of nested/config.txt, then report the child result.",
+      "files": {"nested/config.txt": "subagent evidence"},
       "script": [
-        {"tool_calls": [{"id": "r1", "name": "read_file", "arguments": {"path": "nested/config.txt"}}]},
-        {"content": "nested value"}
+        {"tool_calls": [{"id": "sub-1", "name": "spawn_subagent", "arguments": {"task": "Read nested/config.txt and summarize its evidence."}}]},
+        {"content": "Child found subagent evidence."},
+        {"content": "Delegated result: subagent evidence."}
       ],
-      "expected": {"reason": "completed", "answer_contains": "nested", "tool_sequence": ["read_file"]}
+      "expected": {"reason": "completed", "answer_contains": "subagent evidence", "tool_sequence": ["spawn_subagent"], "min_turns": 2, "max_turns": 2, "tool_output_contains": {"spawn_subagent": "subrun-"}}
     },
     {
       "id": "read-pagination",

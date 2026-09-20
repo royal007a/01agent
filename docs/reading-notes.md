@@ -284,4 +284,4 @@ to behave, so Bash is never included in the child registry.
 - [x] Error-code-driven recovery guidance and trace events
 - [x] Soft repeat reminder before the deterministic hard stop
 - [x] Durable exact-call approval requests and decision API
-- [ ] Bounded, read-only, recursion-free Subagent tool
+- [x] Bounded, read-only, recursion-free Subagent tool

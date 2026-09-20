@@ -26,6 +26,7 @@ Prompt snapshot --> AgentEngine -- bounded loop, compaction, Turn lease, events
                                           +--> read_file / read_skill / recall_context
                                           +--> read_plan / update_plan
                                           +--> write_file / edit_file / bash (double-gated)
+                                          +--> spawn_subagent -> isolated read-only AgentEngine
                                                                              |
                                                                              v
                                                                    platform sandbox
@@ -89,6 +90,13 @@ claims are acknowledged and uncommitted claims are released for redelivery.
 terminal result is idempotently enqueued to its parent run, and is considered
 consumed only after the parent input claim has a committed revision.
 
+`spawn_subagent` creates a fresh bounded child query loop for complex read-only
+exploration. Its registry is rebuilt from an allowlist of `read` tools and never
+contains Bash, mutations, external actions, or itself. Child runs inherit
+cancellation and the parent's memory scope, carry explicit parent run/Turn
+lineage in results and traces, and return only a size-bounded summary. A shared
+semaphore bounds concurrent children.
+
 `ContextCompactor` is injected into the loop. The default window compactor
 first archives raw messages with stable source IDs. It then masks old tool
 results, collapses old assistant prose, head/tail truncates large recent tool
@@ -132,7 +140,7 @@ parse log messages.
 single/paginated/parallel reads, recovery paths, loop and budget exits,
 thinking/action separation, compaction, write/edit, Bash, approval denial,
 canonical commits, queued user/task inputs, fuzzy edits, session continuity,
-lazy Skills, archived recall, persistent Plan state, recovery hints,
+lazy Skills, archived recall, persistent Plan state, isolated Subagents, recovery hints,
 soft-before-hard repeat intervention, and durable approval creation.
 Each case writes and replays its real runtime trace before it is scored. The
 gate currently requires all cases to pass.

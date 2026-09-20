@@ -25,6 +25,7 @@ import (
 	"github.com/royal007a/01agent/internal/runstore"
 	agentserver "github.com/royal007a/01agent/internal/server"
 	"github.com/royal007a/01agent/internal/sessionstore"
+	"github.com/royal007a/01agent/internal/subagent"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -65,7 +66,8 @@ func run() error {
 	if err := registry.Register(readFile); err != nil {
 		return fmt.Errorf("register read_file: %w", err)
 	}
-	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+	readSkill := promptcontext.NewReadSkillTool()
+	if err := registry.Register(readSkill); err != nil {
 		return fmt.Errorf("register read_skill: %w", err)
 	}
 	if enableDangerous {
@@ -100,16 +102,32 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize memory archive: %w", err)
 	}
-	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+	recallContext := memory.NewRecallTool(archive)
+	if err := registry.Register(recallContext); err != nil {
 		return fmt.Errorf("register recall_context: %w", err)
 	}
 	plans, err := plan.NewStore(filepath.Join(store.Dir(), "plans"))
 	if err != nil {
 		return fmt.Errorf("initialize plan store: %w", err)
 	}
-	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+	readPlan := plan.NewReadTool(plans)
+	for _, tool := range []tools.BaseTool{readPlan, plan.NewUpdateTool(plans)} {
 		if err := registry.Register(tool); err != nil {
 			return fmt.Errorf("register %s: %w", tool.Name(), err)
+		}
+	}
+	if model != nil {
+		subagentTool, subagentErr := subagent.NewTool(model, []tools.BaseTool{readFile, readSkill, recallContext, readPlan}, subagent.Config{
+			WorkDir: *workDir, Store: store,
+			MaxTurns: envInt("AGENT_SUBAGENT_MAX_TURNS", 8), MaxTokens: envInt64("AGENT_SUBAGENT_TOKEN_BUDGET", 16_000),
+			Timeout: envDuration("AGENT_SUBAGENT_TIMEOUT", 2*time.Minute), MaxOutput: envInt("AGENT_SUBAGENT_MAX_OUTPUT", 8<<10),
+			MaxConcurrent: envInt("AGENT_SUBAGENT_MAX_CONCURRENT", 2),
+		})
+		if subagentErr != nil {
+			return fmt.Errorf("initialize spawn_subagent: %w", subagentErr)
+		}
+		if err := registry.Register(subagentTool); err != nil {
+			return fmt.Errorf("register spawn_subagent: %w", err)
 		}
 	}
 	sessions, err := sessionstore.New(filepath.Join(store.Dir(), "sessions"))

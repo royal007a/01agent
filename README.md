@@ -18,6 +18,7 @@ lesson 13:
 - workspace-confined `read_file`, `write_file`, and `edit_file` tools plus an
   explicitly approved, platform-sandboxed Bash tool;
 - revisioned capability snapshots and post-approval Turn execution leases;
+- bounded read-only Subagents with fresh context and trace lineage;
 - a canonical history writer with operation identity, semantic fingerprints,
   revision CAS, durable commit barriers, and read-back acknowledgement;
 - JSONL traces, checkpoint/resume, deterministic replay, and context compaction;

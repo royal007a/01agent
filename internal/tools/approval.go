@@ -54,7 +54,7 @@ func (p ApprovalPolicy) CanUse(ctx context.Context, definition schema.ToolDefini
 		return PermissionDecision{Allowed: true}
 	}
 	if p.Backend != nil {
-		scope, ok := approvalScopeFromContext(ctx)
+		scope, ok := ApprovalScopeFromContext(ctx)
 		if !ok {
 			return PermissionDecision{Reason: "durable approval scope is unavailable"}
 		}

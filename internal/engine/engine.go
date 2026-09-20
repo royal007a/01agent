@@ -48,6 +48,8 @@ type Config struct {
 	InputQueue      InputQueue
 	PromptComposer  promptcontext.Composer
 	MemoryScope     string
+	ParentRunID     string
+	ParentTurnID    string
 }
 
 type EventType string
@@ -93,6 +95,8 @@ type Checkpoint struct {
 	Prompt               string                   `json:"prompt"`
 	WorkDir              string                   `json:"work_dir"`
 	MemoryScope          string                   `json:"memory_scope,omitempty"`
+	ParentRunID          string                   `json:"parent_run_id,omitempty"`
+	ParentTurnID         string                   `json:"parent_turn_id,omitempty"`
 	Capability           tools.CapabilityRevision `json:"capability"`
 	Messages             []schema.Message         `json:"messages"`
 	Turn                 int                      `json:"turn"`
@@ -150,6 +154,8 @@ type RunResult struct {
 	Capability      tools.CapabilityRevision `json:"capability"`
 	HistoryRevision int64                    `json:"history_revision"`
 	MemoryScope     string                   `json:"memory_scope,omitempty"`
+	ParentRunID     string                   `json:"parent_run_id,omitempty"`
+	ParentTurnID    string                   `json:"parent_turn_id,omitempty"`
 	Reason          schema.TerminalReason    `json:"reason"`
 	FinalMessage    schema.Message           `json:"final_message"`
 	Messages        []schema.Message         `json:"messages"`
@@ -324,6 +330,16 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 			committedInputClaims[claimID] = revision
 		}
 	}
+	parentRunID := strings.TrimSpace(e.config.ParentRunID)
+	parentTurnID := strings.TrimSpace(e.config.ParentTurnID)
+	if restored != nil {
+		if restored.ParentRunID != "" {
+			parentRunID = restored.ParentRunID
+		}
+		if restored.ParentTurnID != "" {
+			parentTurnID = restored.ParentTurnID
+		}
+	}
 	lease := newTurnLease(runID, turnID, newID("lease"), admission)
 	ctx = tools.WithExecutionLease(ctx, lease)
 	ctx = tools.WithApprovalScope(ctx, tools.ApprovalScope{
@@ -333,7 +349,8 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	startedAt := time.Now().UTC()
 	result := RunResult{
 		RunID: runID, TurnID: turnID, Admission: admission, Capability: capability,
-		HistoryRevision: historyRevision, MemoryScope: memoryScope, Messages: messages, Usage: usage, StartedAt: startedAt,
+		HistoryRevision: historyRevision, MemoryScope: memoryScope, ParentRunID: parentRunID, ParentTurnID: parentTurnID,
+		Messages: messages, Usage: usage, StartedAt: startedAt,
 	}
 	repeatedCalls := make(map[[32]byte]int)
 	for key, count := range repeatedState {
@@ -378,7 +395,8 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		operationID := fmt.Sprintf("%s/op-%06d/%s", runID, operationSequence, kind)
 		checkpoint := Checkpoint{
 			Version: 2, RunID: runID, TurnID: turnID, Admission: admission, LeaseID: lease.ID,
-			Prompt: userPrompt, WorkDir: e.config.WorkDir, MemoryScope: memoryScope, Capability: capability,
+			Prompt: userPrompt, WorkDir: e.config.WorkDir, MemoryScope: memoryScope,
+			ParentRunID: parentRunID, ParentTurnID: parentTurnID, Capability: capability,
 			Messages: append([]schema.Message(nil), messages...), Turn: turn,
 			// Reserve the trace events that follow this barrier. If append fails
 			// after the canonical commit, a resumed admission starts after the
@@ -443,6 +461,7 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	}
 	if err := emit(Event{Type: EventRunStarted, Turn: completedTurns, Metadata: map[string]any{
 		"resumed": restored != nil, "turn_id": turnID, "admission": admission, "lease_id": lease.ID,
+		"parent_run_id": parentRunID, "parent_turn_id": parentTurnID,
 	}}); err != nil {
 		return finish(schema.TerminalPersistenceError, err)
 	}

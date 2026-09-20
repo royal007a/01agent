@@ -22,6 +22,7 @@ import (
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
+	"github.com/royal007a/01agent/internal/subagent"
 	"github.com/royal007a/01agent/internal/tools"
 )
 
@@ -123,19 +124,33 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "01agent: register read_file: %v\n", err)
 		return 2
 	}
-	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+	readSkill := promptcontext.NewReadSkillTool()
+	if err := registry.Register(readSkill); err != nil {
 		fmt.Fprintf(stderr, "01agent: register read_skill: %v\n", err)
 		return 2
 	}
-	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+	recallContext := memory.NewRecallTool(archive)
+	if err := registry.Register(recallContext); err != nil {
 		fmt.Fprintf(stderr, "01agent: register recall_context: %v\n", err)
 		return 2
 	}
-	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+	readPlan := plan.NewReadTool(plans)
+	for _, tool := range []tools.BaseTool{readPlan, plan.NewUpdateTool(plans)} {
 		if err := registry.Register(tool); err != nil {
 			fmt.Fprintf(stderr, "01agent: register %s: %v\n", tool.Name(), err)
 			return 2
 		}
+	}
+	subagentTool, err := subagent.NewTool(model, []tools.BaseTool{readFile, readSkill, recallContext, readPlan}, subagent.Config{
+		WorkDir: config.workDir, Store: store,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "01agent: initialize spawn_subagent: %v\n", err)
+		return 2
+	}
+	if err := registry.Register(subagentTool); err != nil {
+		fmt.Fprintf(stderr, "01agent: register spawn_subagent: %v\n", err)
+		return 2
 	}
 	if config.enableDangerous {
 		writeFile, toolErr := tools.NewWriteFileTool(config.workDir)

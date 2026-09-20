@@ -22,6 +22,7 @@ import (
 	"github.com/royal007a/01agent/internal/runstore"
 	agentsandbox "github.com/royal007a/01agent/internal/sandbox"
 	"github.com/royal007a/01agent/internal/schema"
+	"github.com/royal007a/01agent/internal/subagent"
 	"github.com/royal007a/01agent/internal/tools"
 )
 
@@ -212,6 +213,7 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	if err != nil {
 		return CaseResult{}, err
 	}
+	model := &scriptedProvider{steps: append([]ScriptStep(nil), item.Script...), repeatLast: item.RepeatLast}
 	policy := tools.PermissionPolicy(tools.ReadOnlyPolicy{})
 	if item.EnableDangerous {
 		approvalBackend, approvalErr := approvalstore.New(filepath.Join(workDir, ".approvals"), time.Minute)
@@ -232,16 +234,28 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	if err := registry.Register(readFile); err != nil {
 		return CaseResult{}, err
 	}
-	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+	readSkill := promptcontext.NewReadSkillTool()
+	if err := registry.Register(readSkill); err != nil {
 		return CaseResult{}, err
 	}
-	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+	recallContext := memory.NewRecallTool(archive)
+	if err := registry.Register(recallContext); err != nil {
 		return CaseResult{}, err
 	}
-	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+	readPlan := plan.NewReadTool(plans)
+	for _, tool := range []tools.BaseTool{readPlan, plan.NewUpdateTool(plans)} {
 		if err := registry.Register(tool); err != nil {
 			return CaseResult{}, err
 		}
+	}
+	subagentTool, err := subagent.NewTool(model, []tools.BaseTool{readFile, readSkill, recallContext, readPlan}, subagent.Config{
+		WorkDir: workDir, Store: store, MaxTurns: 4, MaxTokens: 4_000, Timeout: time.Second, MaxOutput: 4 << 10,
+	})
+	if err != nil {
+		return CaseResult{}, err
+	}
+	if err := registry.Register(subagentTool); err != nil {
+		return CaseResult{}, err
 	}
 	if item.EnableDangerous {
 		writeFile, err := tools.NewWriteFileTool(workDir)
@@ -262,7 +276,6 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 			}
 		}
 	}
-	model := &scriptedProvider{steps: append([]ScriptStep(nil), item.Script...), repeatLast: item.RepeatLast}
 	config := engine.Config{
 		WorkDir: workDir, EnableThinking: item.Thinking, MaxTurns: item.MaxTurns,
 		MaxTokens: item.MaxTokens, MaxRepeatedCall: item.MaxRepeatedCall,

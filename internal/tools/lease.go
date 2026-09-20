@@ -19,7 +19,7 @@ func WithApprovalScope(ctx context.Context, scope ApprovalScope) context.Context
 	return context.WithValue(ctx, approvalScopeKey{}, scope)
 }
 
-func approvalScopeFromContext(ctx context.Context) (ApprovalScope, bool) {
+func ApprovalScopeFromContext(ctx context.Context) (ApprovalScope, bool) {
 	scope, ok := ctx.Value(approvalScopeKey{}).(ApprovalScope)
 	return scope, ok && scope.RunID != "" && scope.TurnID != "" && scope.LeaseID != "" && scope.CapabilityDigest != ""
 }
