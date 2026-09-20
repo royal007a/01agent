@@ -224,7 +224,9 @@ func execute(ctx context.Context, call schema.ToolCall, lookup func(string) (Bas
 		if decision.RequiresApproval {
 			code = "approval_required"
 		}
-		return errorResult(call.ID, code, reason, false, true)
+		result := errorResult(call.ID, code, reason, false, true)
+		result.ApprovalID = decision.ApprovalID
+		return result
 	}
 	// Authorization may involve an external approval and outlive the Turn that
 	// requested it. Recheck cancellation and the Turn lease after approval but

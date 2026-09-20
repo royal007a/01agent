@@ -65,6 +65,12 @@ Turn lease immediately before invoking the physical tool. A batch is parallel
 only when every requested tool is explicitly marked parallel-safe; observations
 are returned in the model's original order.
 
+`ApprovalStore` persists exact-call requests for dangerous actions. A request
+binds the run, origin Turn lease, capability digest, tool, canonical arguments
+digest, and expiry. The authenticated decision API can approve or reject it;
+an approval is consumed exactly once when the same run requests the same call
+again, and the active admission's Turn lease is then checked before execution.
+
 `RunStore` is the canonical history writer. Every mutation carries a monotonic
 operation ID, semantic SHA-256 fingerprint, and expected revision. The writer
 atomically replaces the checkpoint, `fsync`s it and its directory, reads it
@@ -126,8 +132,8 @@ parse log messages.
 single/paginated/parallel reads, recovery paths, loop and budget exits,
 thinking/action separation, compaction, write/edit, Bash, approval denial,
 canonical commits, queued user/task inputs, fuzzy edits, session continuity,
-lazy Skills, archived recall, persistent Plan state, recovery hints, and
-soft-before-hard repeat intervention.
+lazy Skills, archived recall, persistent Plan state, recovery hints,
+soft-before-hard repeat intervention, and durable approval creation.
 Each case writes and replays its real runtime trace before it is scored. The
 gate currently requires all cases to pass.
 
@@ -139,8 +145,9 @@ the deterministic CI gate.
 ## Dangerous tools
 
 `write_file`, `edit_file`, and `bash` are absent unless explicitly enabled.
-Even then, a run receives only the dangerous tool names supplied in its
-approval context. File changes are rooted and atomic. Bash has bounded time and
+Even then, an unapproved exact call becomes a durable pending request. The
+authenticated API may also supply explicit operator preapprovals for backward
+compatibility. File changes are rooted and atomic. Bash has bounded time and
 output, receives a minimal environment, and fails closed without its platform
 sandbox. Linux uses Landlock ABI V4 for filesystem access and seccomp to deny
 socket syscalls; macOS uses `sandbox-exec`. Container/user isolation remains an

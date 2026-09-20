@@ -92,7 +92,8 @@ Thinking is local decision quality.
 - Output is paginated instead of silently hiding the remainder of a file.
 - Repeated identical calls are stopped before they become a doom loop.
 - Provider retries apply only to transient failures and honor `Retry-After`.
-- Write/edit/Bash require both startup enablement and explicit per-run approval.
+- Write/edit/Bash require both startup enablement and approval. Unapproved
+  exact calls create durable, expiring requests under the run directory.
 - Approval is followed by a Turn-lease check immediately before physical tool
   execution, preventing a late approval from reviving a canceled Turn.
 - Bash fails closed unless a platform sandbox is available. Linux uses Landlock
@@ -167,8 +168,13 @@ curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
 ```
 
 Resume a saved checkpoint with `{"resume_run_id":"run-..."}`. When dangerous
-tools are enabled at server startup, each request must still name its approvals,
-for example `{"prompt":"...","approved_tools":["write_file"]}`.
+tools are enabled at server startup, an authenticated operator may preapprove
+tool names for compatibility, for example
+`{"prompt":"...","approved_tools":["write_file"]}`. Without preapproval the
+response includes an `approval_id`. Inspect it with `GET /v1/approvals/{id}`,
+decide it with `POST /v1/approvals/{id}/decision` using
+`{"decision":"approved","actor":"operator"}`, then resume the run. Decisions
+are exact-call, expiring, durable, and single-use.
 
 For a durable multi-turn conversation, use the Session endpoint. The
 `operation_id` should be the upstream message/event ID; retrying the same ID

@@ -326,6 +326,9 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	}
 	lease := newTurnLease(runID, turnID, newID("lease"), admission)
 	ctx = tools.WithExecutionLease(ctx, lease)
+	ctx = tools.WithApprovalScope(ctx, tools.ApprovalScope{
+		RunID: runID, TurnID: turnID, LeaseID: lease.ID, Admission: admission, CapabilityDigest: capability.Digest,
+	})
 	defer lease.Deactivate()
 	startedAt := time.Now().UTC()
 	result := RunResult{

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/memory"
@@ -46,9 +47,15 @@ func run() error {
 		return fmt.Errorf("initialize read_file: %w", err)
 	}
 	enableDangerous := envBool("AGENT_ENABLE_DANGEROUS_TOOLS", false)
+	runDir := envOr("AGENT_RUN_DIR", "/tmp/01agent-runs")
+	var approvals *approvalstore.Store
 	policy := tools.PermissionPolicy(tools.ReadOnlyPolicy{})
 	if enableDangerous {
-		policy = tools.ApprovalPolicy{}
+		approvals, err = approvalstore.New(filepath.Join(runDir, "approvals"), envDuration("AGENT_APPROVAL_TTL", 15*time.Minute))
+		if err != nil {
+			return fmt.Errorf("initialize approval store: %w", err)
+		}
+		policy = tools.ApprovalPolicy{Backend: approvals}
 	}
 	registry := tools.NewRegistry(
 		tools.WithPermissionPolicy(policy),
@@ -85,7 +92,7 @@ func run() error {
 	if providerErr != nil {
 		log.Printf("provider not ready: %v", providerErr)
 	}
-	store, err := runstore.New(envOr("AGENT_RUN_DIR", "/tmp/01agent-runs"))
+	store, err := runstore.New(runDir)
 	if err != nil {
 		return fmt.Errorf("initialize run store: %w", err)
 	}
@@ -140,6 +147,7 @@ func run() error {
 		InputEnqueuer:    store,
 		Tasks:            tasks,
 		Sessions:         sessions,
+		Approvals:        approvals,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),
 		ReadinessTimeout: envDuration("AGENT_READINESS_TIMEOUT", 10*time.Second),
 	})

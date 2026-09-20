@@ -57,6 +57,7 @@ type ToolResult struct {
 	ErrorCode  string `json:"error_code,omitempty"`
 	Retryable  bool   `json:"retryable,omitempty"`
 	Fatal      bool   `json:"fatal,omitempty"`
+	ApprovalID string `json:"approval_id,omitempty"`
 }
 
 // Usage is provider-reported token usage. Providers that cannot report usage

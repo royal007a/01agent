@@ -33,6 +33,7 @@ type PermissionDecision struct {
 	Allowed          bool
 	Reason           string
 	RequiresApproval bool
+	ApprovalID       string
 }
 
 type PermissionPolicy interface {

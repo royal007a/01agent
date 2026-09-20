@@ -164,7 +164,7 @@
       "script": [
         {"tool_calls": [{"id": "w-denied", "name": "write_file", "arguments": {"path": "generated.txt", "content": "hello"}}]}
       ],
-      "expected": {"reason": "approval_required", "tool_sequence": ["write_file"], "min_turns": 1, "max_turns": 1}
+      "expected": {"reason": "approval_required", "tool_sequence": ["write_file"], "min_turns": 1, "max_turns": 1, "min_approval_requests": 1}
     },
     {
       "id": "approved-write-read",

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/memory"
@@ -60,19 +61,20 @@ type ScriptStep struct {
 }
 
 type Expected struct {
-	Reason             schema.TerminalReason `json:"reason"`
-	AnswerContains     string                `json:"answer_contains,omitempty"`
-	ToolSequence       []string              `json:"tool_sequence,omitempty"`
-	MinTurns           int                   `json:"min_turns,omitempty"`
-	MaxTurns           int                   `json:"max_turns,omitempty"`
-	MinCompactions     int                   `json:"min_compactions,omitempty"`
-	MinHistoryCommits  int                   `json:"min_history_commits,omitempty"`
-	MinInputClaims     int                   `json:"min_input_claims,omitempty"`
-	MinRecoveryHints   int                   `json:"min_recovery_hints,omitempty"`
-	MinReminders       int                   `json:"min_reminders,omitempty"`
-	Files              map[string]string     `json:"files,omitempty"`
-	ContextContains    []string              `json:"context_contains,omitempty"`
-	ToolOutputContains map[string]string     `json:"tool_output_contains,omitempty"`
+	Reason              schema.TerminalReason `json:"reason"`
+	AnswerContains      string                `json:"answer_contains,omitempty"`
+	ToolSequence        []string              `json:"tool_sequence,omitempty"`
+	MinTurns            int                   `json:"min_turns,omitempty"`
+	MaxTurns            int                   `json:"max_turns,omitempty"`
+	MinCompactions      int                   `json:"min_compactions,omitempty"`
+	MinHistoryCommits   int                   `json:"min_history_commits,omitempty"`
+	MinInputClaims      int                   `json:"min_input_claims,omitempty"`
+	MinRecoveryHints    int                   `json:"min_recovery_hints,omitempty"`
+	MinReminders        int                   `json:"min_reminders,omitempty"`
+	MinApprovalRequests int                   `json:"min_approval_requests,omitempty"`
+	Files               map[string]string     `json:"files,omitempty"`
+	ContextContains     []string              `json:"context_contains,omitempty"`
+	ToolOutputContains  map[string]string     `json:"tool_output_contains,omitempty"`
 }
 
 type CaseResult struct {
@@ -212,7 +214,11 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	}
 	policy := tools.PermissionPolicy(tools.ReadOnlyPolicy{})
 	if item.EnableDangerous {
-		policy = tools.ApprovalPolicy{}
+		approvalBackend, approvalErr := approvalstore.New(filepath.Join(workDir, ".approvals"), time.Minute)
+		if approvalErr != nil {
+			return CaseResult{}, approvalErr
+		}
+		policy = tools.ApprovalPolicy{Backend: approvalBackend}
 	}
 	registry := tools.NewRegistry(tools.WithPermissionPolicy(policy))
 	archive, err := memory.NewArchive(filepath.Join(artifactsDir, "memory"))
@@ -292,12 +298,16 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	inputClaims := 0
 	recoveryHints := 0
 	reminders := 0
+	approvalRequests := 0
 	for _, event := range trace.Events {
 		if event.Type == engine.EventToolStarted {
 			actualTools = append(actualTools, event.ToolCall.Name)
 			callNames[event.ToolCall.ID] = event.ToolCall.Name
 		}
 		if event.Type == engine.EventToolResult {
+			if event.ToolResult.ApprovalID != "" {
+				approvalRequests++
+			}
 			if name := callNames[event.ToolResult.ToolCallID]; name != "" {
 				toolOutputs[name] = append(toolOutputs[name], event.ToolResult.Output)
 			}
@@ -349,6 +359,9 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	}
 	if reminders < item.Expected.MinReminders {
 		failures = append(failures, fmt.Sprintf("reminders=%d below %d", reminders, item.Expected.MinReminders))
+	}
+	if approvalRequests < item.Expected.MinApprovalRequests {
+		failures = append(failures, fmt.Sprintf("approval_requests=%d below %d", approvalRequests, item.Expected.MinApprovalRequests))
 	}
 	for name, expectedContent := range item.Expected.Files {
 		path := filepath.Join(workDir, filepath.Clean(name))

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/schema"
@@ -43,6 +44,7 @@ type Config struct {
 	InputEnqueuer    engine.InputEnqueuer
 	Tasks            *taskstore.Store
 	Sessions         *sessionstore.Store
+	Approvals        *approvalstore.Store
 	ReadinessTTL     time.Duration
 	ReadinessTimeout time.Duration
 }
@@ -93,6 +95,11 @@ type taskEventRequest struct {
 	Failure string `json:"failure,omitempty"`
 }
 
+type approvalDecisionRequest struct {
+	Decision approvalstore.State `json:"decision"`
+	Actor    string              `json:"actor,omitempty"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -135,6 +142,9 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v1/tasks", handler.authorize(handler.createTask))
 	handler.mux.HandleFunc("GET /v1/tasks/{taskID}", handler.authorize(handler.getTask))
 	handler.mux.HandleFunc("POST /v1/tasks/{taskID}/events", handler.authorize(handler.taskEvent))
+	handler.mux.HandleFunc("GET /v1/approvals", handler.authorize(handler.listApprovals))
+	handler.mux.HandleFunc("GET /v1/approvals/{approvalID}", handler.authorize(handler.getApproval))
+	handler.mux.HandleFunc("POST /v1/approvals/{approvalID}/decision", handler.authorize(handler.decideApproval))
 	return handler, nil
 }
 
@@ -551,6 +561,51 @@ func (h *Handler) taskEvent(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"task": task})
+}
+
+func (h *Handler) listApprovals(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Approvals == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "approval store is not configured"})
+		return
+	}
+	state := approvalstore.State(strings.TrimSpace(request.URL.Query().Get("state")))
+	items, err := h.config.Approvals.List(request.Context(), state)
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"approvals": items})
+}
+
+func (h *Handler) getApproval(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Approvals == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "approval store is not configured"})
+		return
+	}
+	item, err := h.config.Approvals.Get(request.Context(), request.PathValue("approvalID"))
+	if err != nil {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"approval": item})
+}
+
+func (h *Handler) decideApproval(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Approvals == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "approval store is not configured"})
+		return
+	}
+	var input approvalDecisionRequest
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	item, err := h.config.Approvals.Decide(request.Context(), request.PathValue("approvalID"), input.Decision, input.Actor)
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"approval": item})
 }
 
 func decodeRequest(writer http.ResponseWriter, request *http.Request, target any) error {

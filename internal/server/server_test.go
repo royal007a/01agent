@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
@@ -189,6 +190,38 @@ func TestHandlerEnqueuesSteerWithClaimAckQueue(t *testing.T) {
 	claim, err := store.Claim(context.Background(), "run-steer", "turn-test", 10)
 	if err != nil || len(claim.Items) != 1 || claim.Items[0].Content != "also update tests" {
 		t.Fatalf("claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestApprovalDecisionHTTPAPI(t *testing.T) {
+	approvals, err := approvalstore.New(t.TempDir(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := approvals.Resolve(context.Background(), tools.ApprovalRequest{
+		RunID: "run-http", TurnID: "turn-http", LeaseID: "lease-http", CapabilityDigest: "cap-http",
+		ToolName: "bash", Arguments: json.RawMessage(`{"command":"true"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Approvals: approvals})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+pending.ID+"/decision", strings.NewReader(`{"decision":"approved","actor":"operator"}`))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"approved"`) {
+		t.Fatalf("decision=%d %s", response.Code, response.Body.String())
+	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/v1/approvals?state=approved", nil)
+	listRequest.Header.Set("Authorization", "Bearer secret")
+	listed := httptest.NewRecorder()
+	handler.ServeHTTP(listed, listRequest)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), pending.ID) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
 	}
 }
 

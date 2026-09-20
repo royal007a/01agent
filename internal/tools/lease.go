@@ -5,6 +5,25 @@ import (
 	"errors"
 )
 
+type ApprovalScope struct {
+	RunID            string
+	TurnID           string
+	LeaseID          string
+	Admission        int
+	CapabilityDigest string
+}
+
+type approvalScopeKey struct{}
+
+func WithApprovalScope(ctx context.Context, scope ApprovalScope) context.Context {
+	return context.WithValue(ctx, approvalScopeKey{}, scope)
+}
+
+func approvalScopeFromContext(ctx context.Context) (ApprovalScope, bool) {
+	scope, ok := ctx.Value(approvalScopeKey{}).(ApprovalScope)
+	return scope, ok && scope.RunID != "" && scope.TurnID != "" && scope.LeaseID != "" && scope.CapabilityDigest != ""
+}
+
 var ErrStaleExecutionLease = errors.New("tool execution lease is no longer active")
 
 // ExecutionLease is revalidated after permission/approval and immediately
