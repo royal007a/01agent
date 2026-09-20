@@ -17,9 +17,13 @@ import (
 
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
+	"github.com/royal007a/01agent/internal/memory"
+	"github.com/royal007a/01agent/internal/plan"
+	promptcontext "github.com/royal007a/01agent/internal/prompt"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/runstore"
 	agentserver "github.com/royal007a/01agent/internal/server"
+	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -54,6 +58,9 @@ func run() error {
 	if err := registry.Register(readFile); err != nil {
 		return fmt.Errorf("register read_file: %w", err)
 	}
+	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+		return fmt.Errorf("register read_skill: %w", err)
+	}
 	if enableDangerous {
 		writeFile, toolErr := tools.NewWriteFileTool(*workDir)
 		if toolErr != nil {
@@ -82,6 +89,26 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize run store: %w", err)
 	}
+	archive, err := memory.NewArchive(filepath.Join(store.Dir(), "memory"))
+	if err != nil {
+		return fmt.Errorf("initialize memory archive: %w", err)
+	}
+	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+		return fmt.Errorf("register recall_context: %w", err)
+	}
+	plans, err := plan.NewStore(filepath.Join(store.Dir(), "plans"))
+	if err != nil {
+		return fmt.Errorf("initialize plan store: %w", err)
+	}
+	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+		if err := registry.Register(tool); err != nil {
+			return fmt.Errorf("register %s: %w", tool.Name(), err)
+		}
+	}
+	sessions, err := sessionstore.New(filepath.Join(store.Dir(), "sessions"))
+	if err != nil {
+		return fmt.Errorf("initialize session store: %w", err)
+	}
 	tasks, err := taskstore.New(filepath.Join(store.Dir(), "tasks"), store, store)
 	if err != nil {
 		return fmt.Errorf("initialize background task store: %w", err)
@@ -92,7 +119,7 @@ func run() error {
 	}
 	var compactor engine.ContextCompactor
 	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
-		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5}
+		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5, Archive: archive}
 	}
 	handler, err := agentserver.New(agentserver.Config{
 		Version:          version,
@@ -101,6 +128,7 @@ func run() error {
 		Provider:         model,
 		Registry:         registry,
 		EnableThinking:   envBool("AGENT_THINKING", false),
+		PlanMode:         envBool("AGENT_PLAN_MODE", false),
 		MaxTurns:         envInt("AGENT_MAX_TURNS", 32),
 		MaxTokens:        envInt64("AGENT_TOKEN_BUDGET", 0),
 		MaxRepeatedCall:  envInt("AGENT_MAX_REPEATED_CALL", 3),
@@ -111,6 +139,7 @@ func run() error {
 		InputQueue:       store,
 		InputEnqueuer:    store,
 		Tasks:            tasks,
+		Sessions:         sessions,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),
 		ReadinessTimeout: envDuration("AGENT_READINESS_TIMEOUT", 10*time.Second),
 	})

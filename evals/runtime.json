@@ -192,6 +192,26 @@
       "expected": {"reason": "completed", "answer_contains": "verified", "tool_sequence": ["edit_file", "read_file"], "min_turns": 3, "max_turns": 3}
     },
     {
+      "id": "approved-fuzzy-edit",
+      "prompt": "Update the nested block despite omitted indentation, then verify it.",
+      "files": {"nested.go": "func run() {\n        if ready {\n                start()\n        }\n}\n"},
+      "enable_dangerous": true,
+      "approved_tools": ["edit_file"],
+      "script": [
+        {"tool_calls": [{"id": "e-fuzzy", "name": "edit_file", "arguments": {"path": "nested.go", "old_text": "if ready {\nstart()\n}", "new_text": "if ready {\n    stop()\n}"}}]},
+        {"tool_calls": [{"id": "r-fuzzy", "name": "read_file", "arguments": {"path": "nested.go"}}]},
+        {"content": "fuzzy edit verified"}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "verified",
+        "tool_sequence": ["edit_file", "read_file"],
+        "min_turns": 3,
+        "max_turns": 3,
+        "files": {"nested.go": "func run() {\n        if ready {\n            stop()\n        }\n}\n"}
+      }
+    },
+    {
       "id": "approved-bash",
       "prompt": "Run a harmless command.",
       "enable_dangerous": true,
@@ -221,6 +241,91 @@
       "inputs": [{"id": "task-eval", "kind": "task_result", "content": "{\"task_id\":\"task-eval\",\"state\":\"succeeded\",\"output\":\"callers safe\"}"}],
       "script": [{"content": "task result consumed"}],
       "expected": {"reason": "completed", "answer_contains": "consumed", "tool_sequence": [], "min_input_claims": 1, "min_history_commits": 4}
+    },
+    {
+      "id": "session-history-continuation",
+      "prompt": "What color did I ask you to remember?",
+      "history": [
+        {"role": "system", "content": "You retain conversation facts."},
+        {"role": "user", "content": "Remember the color blue."},
+        {"role": "assistant", "content": "I will remember blue."}
+      ],
+      "script": [{"content": "The remembered color is blue."}],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "blue",
+        "tool_sequence": [],
+        "min_turns": 1,
+        "max_turns": 1,
+        "context_contains": ["Remember the color blue.", "What color did I ask you to remember?"]
+      }
+    },
+    {
+      "id": "skill-progressive-disclosure",
+      "prompt": "Use the review skill and answer.",
+      "files": {
+        "AGENTS.md": "Always inspect relevant workspace instructions.",
+        ".01agent/skills/review/SKILL.md": "---\nname: review\ndescription: Review code evidence before deciding.\n---\n# Review instructions\nCheck concrete evidence and report uncertainty.\n"
+      },
+      "script": [
+        {"tool_calls": [{"id": "skill-1", "name": "read_skill", "arguments": {"name": "review"}}]},
+        {"content": "review skill applied"}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "applied",
+        "tool_sequence": ["read_skill"],
+        "min_turns": 2,
+        "max_turns": 2,
+        "context_contains": ["Always inspect relevant workspace instructions.", "review: Review code evidence before deciding."]
+      }
+    },
+    {
+      "id": "archived-context-recall",
+      "prompt": "Read the record, then recall its codename from archived context.",
+      "files": {
+        "record.txt": "The project codename is ORION-NEBULA. This exact fact must remain recallable after compaction. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "context_tokens": 280,
+      "script": [
+        {"tool_calls": [{"id": "archive-read", "name": "read_file", "arguments": {"path": "record.txt"}}]},
+        {"tool_calls": [{"id": "archive-recall", "name": "recall_context", "arguments": {"query": "project codename", "limit": 3}}]},
+        {"content": "Recalled ORION-NEBULA."}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "ORION-NEBULA",
+        "tool_sequence": ["read_file", "recall_context"],
+        "min_turns": 3,
+        "max_turns": 3,
+        "min_compactions": 1,
+        "tool_output_contains": {"recall_context": "ORION-NEBULA"}
+      }
+    },
+    {
+      "id": "persistent-plan-state",
+      "prompt": "Create a two-step plan, mark the first step active, then read it back.",
+      "script": [
+        {"tool_calls": [{"id": "plan-update", "name": "update_plan", "arguments": {
+          "operation_id": "plan-op-1",
+          "expected_revision": 0,
+          "objective": "Ship the harness safely",
+          "steps": [
+            {"id": "implement", "title": "Implement the change", "status": "in_progress"},
+            {"id": "verify", "title": "Run the evaluator", "status": "pending"}
+          ]
+        }}]},
+        {"tool_calls": [{"id": "plan-read", "name": "read_plan", "arguments": {}}]},
+        {"content": "Plan persisted and verified."}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "verified",
+        "tool_sequence": ["update_plan", "read_plan"],
+        "min_turns": 3,
+        "max_turns": 3,
+        "tool_output_contains": {"read_plan": "Ship the harness safely"}
+      }
     }
   ]
 }

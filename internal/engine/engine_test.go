@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +181,20 @@ func TestRunCompletesAfterToolObservation(t *testing.T) {
 	}
 }
 
+func TestPlanModeIsAnExplicitPromptCapability(t *testing.T) {
+	model := &scriptedProvider{generations: []schema.Generation{{Message: schema.Message{Content: "done"}}}}
+	agent, err := New(model, newFakeRegistry(), Config{WorkDir: t.TempDir(), PlanMode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "continue"); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.histories) != 1 || !strings.Contains(model.histories[0][0].Content, "# Plan mode") || !strings.Contains(model.histories[0][0].Content, "expected_revision 0") {
+		t.Fatalf("system prompt = %#v", model.histories)
+	}
+}
+
 func TestThinkingPhaseHasNoToolsAndFeedsAction(t *testing.T) {
 	model := &scriptedProvider{generations: []schema.Generation{
 		{Message: schema.Message{Content: "plan first"}},
@@ -345,6 +361,36 @@ func TestResumeRejectsChangedCapabilitySnapshot(t *testing.T) {
 	changed := newFakeRegistry()
 	changed.revision = "changed-capability"
 	second, err := New(&scriptedProvider{}, changed, Config{WorkDir: workDir, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Resume(context.Background(), checkpoint); err == nil || !strings.Contains(err.Error(), "capability revision changed") {
+		t.Fatalf("resume error=%v", err)
+	}
+}
+
+func TestResumeRejectsChangedPromptCapabilitySnapshot(t *testing.T) {
+	store := &memoryStore{}
+	workDir := t.TempDir()
+	agentsPath := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("instruction revision one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := New(&scriptedProvider{generations: []schema.Generation{{Message: schema.Message{Content: "done"}}}}, newFakeRegistry(), Config{
+		WorkDir: workDir, Store: store, RunID: "run-prompt-capability",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Run(context.Background(), "inspect"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := store.checkpoint
+	checkpoint.Reason = schema.TerminalProviderError
+	if err := os.WriteFile(agentsPath, []byte("instruction revision two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(&scriptedProvider{}, newFakeRegistry(), Config{WorkDir: workDir, Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}

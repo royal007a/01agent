@@ -43,7 +43,7 @@ type PermissionPolicy interface {
 type ReadOnlyPolicy struct{}
 
 func (ReadOnlyPolicy) CanUse(_ context.Context, definition schema.ToolDefinition, _ json.RawMessage) PermissionDecision {
-	if definition.Risk == schema.RiskRead {
+	if definition.Risk == schema.RiskRead || definition.Risk == schema.RiskState {
 		return PermissionDecision{Allowed: true}
 	}
 	return PermissionDecision{Reason: "only read-only tools are permitted by the active policy"}

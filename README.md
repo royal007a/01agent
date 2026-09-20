@@ -5,8 +5,8 @@ model as the planner and keeps reliability in code: a bounded ReAct loop,
 provider adapters, deterministic tool dispatch, durable traces and checkpoints,
 evaluation gates, permission checks, and an explicit workspace boundary.
 
-The first release implements the material covered by the first six course
-PDFs supplied for this project:
+The current release implements the supplied Agent Harness material through
+lesson 13:
 
 - a provider-neutral message and tool-call schema;
 - an OpenAI-compatible provider and a Claude-compatible provider;
@@ -14,17 +14,29 @@ PDFs supplied for this project:
 - hard exits for turn, token, timeout, cancellation, permission, and fatal
   tool failures;
 - a concurrency-aware tool registry with JSON Schema validation;
+- a four-level, unique-only Edit fallback with stale-content SHA-256 checks;
 - workspace-confined `read_file`, `write_file`, and `edit_file` tools plus an
   explicitly approved, platform-sandboxed Bash tool;
 - revisioned capability snapshots and post-approval Turn execution leases;
 - a canonical history writer with operation identity, semantic fingerprints,
   revision CAS, durable commit barriers, and read-back acknowledgement;
 - JSONL traces, checkpoint/resume, deterministic replay, and context compaction;
+- durable multi-Run sessions with per-session serialization, pending-turn
+  recovery, and operation-ID replay;
+- revisioned prompt snapshots with workspace `AGENTS.md`, lazy Skills, and
+  `read_skill`;
+- a raw context archive, tiered compaction, source IDs, and session-scoped
+  `recall_context` search;
+- canonical Plan state with revision CAS and repairable PLAN.md/TODO.md
+  projections;
+- an explicit Plan Mode switch for long-lived tasks, independent of the
+  per-turn Thinking phase;
+- a durable Feishu worker queue using the official Channel/WebSocket SDK;
 - durable claim/ack inputs for user steering, tool input, and child-task results;
 - a restart-safe background-task state machine with heartbeat, lost/reconcile,
   result delivery, and consumption acknowledgement;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
-- a 23-task deterministic evaluator used as a required CI gate;
+- a 28-task deterministic evaluator used as a required CI gate;
 - a reproducible CLI, tests, container image, CI, and GHCR publishing.
 
 ## Quick start
@@ -60,6 +72,11 @@ Use `--thinking` for a separate tool-free planning call before each action
 call. Thinking text is kept internal unless `--show-thinking` is explicitly
 set.
 
+Use `--plan-mode` for a long-lived task. It instructs the model to bootstrap or
+resume the canonical external plan and to checkpoint each completed or blocked
+step. This is independent from `--thinking`: Plan Mode is macro-level progress;
+Thinking is local decision quality.
+
 ```bash
 ./bin/01agent --help
 ```
@@ -68,7 +85,8 @@ set.
 
 - The loop stops after 32 turns and after 10 minutes unless configured.
 - Tool arguments are validated before permission checks and execution.
-- Only `read_file` is enabled by default.
+- Workspace writes and command execution are disabled by default. Read-only
+  tools and harness-internal Plan state remain available.
 - File tools use rooted filesystem handles to reject absolute paths, traversal,
   symlink escapes, and FIFO blocking/TOCTOU path swaps.
 - Output is paginated instead of silently hiding the remainder of a file.
@@ -94,7 +112,7 @@ deployment. Do not expose host credentials, Docker sockets, or unrelated data
 to the service container.
 
 See [the architecture](docs/architecture.md) and
-[the six-PDF reading notes](docs/reading-notes.md) for design rationale.
+[the course reading notes](docs/reading-notes.md) for design rationale.
 
 ## Verification
 
@@ -102,8 +120,8 @@ See [the architecture](docs/architecture.md) and
 make verify
 ```
 
-`make verify` formats-checks, vets, runs race-enabled tests, builds all five
-binaries, and executes the 23-case deterministic runtime suite. The evaluator
+`make verify` formats-checks, vets, runs race-enabled tests, builds all six
+binaries, and executes the 28-case deterministic runtime suite. The evaluator
 records success rate, tool-sequence correctness, terminal reason, turns, token
 usage, latency, and estimated cost. Its report and per-case traces are written
 to `artifacts/eval/`; the configured 100% gate makes CI fail on any regression.
@@ -144,13 +162,32 @@ docker run -d --name 01agent-http -p 8080:8080 \
 curl http://127.0.0.1:8080/healthz
 curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"Summarize README.md"}' \
+  -d '{"prompt":"Summarize README.md","plan_mode":false}' \
   http://127.0.0.1:8080/v1/runs
 ```
 
 Resume a saved checkpoint with `{"resume_run_id":"run-..."}`. When dangerous
 tools are enabled at server startup, each request must still name its approvals,
 for example `{"prompt":"...","approved_tools":["write_file"]}`.
+
+For a durable multi-turn conversation, use the Session endpoint. The
+`operation_id` should be the upstream message/event ID; retrying the same ID
+with the same prompt returns the original Run result without invoking the
+model again:
+
+```bash
+curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"operation_id":"message-001","prompt":"Remember that the codename is Orion.","plan_mode":true}' \
+  http://127.0.0.1:8080/v1/sessions/chat-001/turns
+
+curl -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  http://127.0.0.1:8080/v1/sessions/chat-001
+```
+
+Set `AGENT_PLAN_MODE=true` to make Plan Mode the HTTP default; an individual Run
+or Session request can override it with `plan_mode`. Keep it off for simple
+lookups and short one-step actions.
 
 A caller can choose a stable run ID and steer it while it is active. Inputs are
 claimed, committed into canonical history, and acknowledged only after the
@@ -167,3 +204,28 @@ Background workers use `POST /v1/tasks`, `GET /v1/tasks/{taskID}`, and
 `POST /v1/tasks/{taskID}/events`. Terminal task output is delivered to the
 parent run as a `task_result` input. The daemon reconciles stale heartbeats to
 `lost` and repairs delivery/consumption state after restart.
+
+## Feishu bridge
+
+`01agent-feishu` connects with the official Feishu Channel/WebSocket SDK. It
+durably records each normalized message before acknowledging the callback,
+then bounded workers call the Session API and reply in the original chat.
+Feishu `event_id` is the idempotency key; interrupted jobs are reconciled after
+restart.
+
+```bash
+export FEISHU_APP_ID=cli_xxx
+export FEISHU_APP_SECRET=xxx
+export AGENT_API_URL=http://127.0.0.1:8080
+export AGENT_API_TOKEN=xxx
+export FEISHU_QUEUE_DIR=/var/lib/01agent/feishu
+
+/usr/local/bin/01agent-feishu
+```
+
+The SDK's default policy requires a bot mention in group chats, blocks
+`@all`, and permits direct messages. `FEISHU_WORKERS`, `FEISHU_QUEUE_SIZE`,
+`FEISHU_MAX_ATTEMPTS`, and `FEISHU_JOB_TIMEOUT` tune the durable worker pool.
+`FEISHU_APPROVED_TOOLS` is an optional comma-separated list forwarded to each
+Session turn; leave it empty unless the IM bot is intentionally allowed to use
+dangerous tools.

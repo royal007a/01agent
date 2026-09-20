@@ -1,7 +1,8 @@
 # Deployment
 
-The deployment image ships both the one-shot `01agent` CLI and the `01agentd`
-HTTP service in one reproducible container.
+The deployment image ships the one-shot `01agent` CLI, the `01agentd` HTTP
+service, the `01agent-feishu` bridge, the evaluator/replay utilities, and the
+Linux sandbox helper in one reproducible container.
 
 ## Automated GHCR publication
 
@@ -47,7 +48,8 @@ minutes by default). `POST /v1/runs` requires
 
 The service limits request bodies, concurrent runs, total run time, turns,
 repeated calls, provider traffic, and tool duration. Persist `AGENT_RUN_DIR` so
-traces, canonical history, inboxes, and task state survive container replacement:
+traces, canonical history, session turns, raw context archives, plan/TODO state,
+inboxes, and background-task state survive container replacement:
 
 ```bash
 docker volume create 01agent-runs
@@ -60,12 +62,53 @@ docker run -d --name 01agent-http -p 8080:8080 \
 ```
 
 To resume, POST `{"resume_run_id":"run-..."}`. The checkpoint includes its
-workspace path; resume rejects a mismatch and rejects already completed runs.
+workspace path and the complete capability revision; resume rejects a workspace,
+tool, prompt, AGENTS.md, or Skill snapshot mismatch and rejects already completed
+runs.
+
+Durable conversations use `POST /v1/sessions/{sessionID}/turns`. Supply a stable
+`operation_id` in the body so a caller can retry without running the model or a
+tool twice. The turn is persisted before execution, same-session turns are
+serialized, and incomplete turns recover from a committed result or checkpoint.
+`GET /v1/sessions/{sessionID}` returns the canonical conversation state.
+Set `AGENT_PLAN_MODE=true` to enable external planning by default, or send a
+per-request `plan_mode` boolean. Plan Mode is best reserved for long-lived work;
+it is independent from `AGENT_THINKING`.
+
+Context compaction archives omitted raw messages under `AGENT_RUN_DIR` before
+shrinking the model-visible window. `recall_context` searches only the current
+session/run archive, while `read_plan` and `update_plan` expose revision-checked
+structured planning state. These stores are part of the durable runtime volume;
+do not put them on ephemeral container storage.
 
 The daemon reconciles background tasks every `AGENT_TASK_RECONCILE_INTERVAL`
 (30 seconds by default). Running/stopping tasks whose heartbeat is older than
 `AGENT_TASK_HEARTBEAT_TIMEOUT` (two minutes by default) become `lost`; pending
 terminal delivery and parent-run consumption acknowledgements are also repaired.
+
+## Feishu bridge
+
+Run the HTTP service and bridge against the same durable deployment. The bridge
+uses the official Feishu Channel/WebSocket SDK and persists every event before
+acknowledging it to the in-process worker queue. A Feishu `event_id` becomes the
+idempotent operation ID sent to the Session API, so retries and process restarts
+do not create duplicate Agent turns.
+
+```bash
+docker run -d --name 01agent-feishu \
+  --env-file .env.feishu \
+  -v 01agent-runs:/var/lib/01agent/runs \
+  --entrypoint /usr/local/bin/01agent-feishu \
+  ghcr.io/royal007a/01agent:main
+```
+
+Required bridge variables are `FEISHU_APP_ID`, `FEISHU_APP_SECRET`,
+`AGENT_API_URL`, and `AGENT_API_TOKEN`. The default queue location is beneath
+`AGENT_RUN_DIR`; override it with `FEISHU_QUEUE_DIR` only when that path is also
+durable. Tune bounded concurrency with `FEISHU_WORKERS`, `FEISHU_QUEUE_SIZE`,
+`FEISHU_MAX_ATTEMPTS`, and `FEISHU_JOB_TIMEOUT`. Use
+`FEISHU_APPROVED_TOOLS` to pass an explicit comma-separated approval list to
+each turn; leaving it unset keeps the safe read-only defaults.
 
 ## Dangerous-tool deployment
 

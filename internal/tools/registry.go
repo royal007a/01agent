@@ -31,8 +31,12 @@ type Runtime interface {
 }
 
 type CapabilityRevision struct {
-	Sequence uint64 `json:"sequence"`
-	Digest   string `json:"digest"`
+	Sequence     uint64 `json:"sequence"`
+	Digest       string `json:"digest"`
+	ToolDigest   string `json:"tool_digest,omitempty"`
+	PromptDigest string `json:"prompt_digest,omitempty"`
+	AgentsDigest string `json:"agents_digest,omitempty"`
+	SkillsDigest string `json:"skills_digest,omitempty"`
 }
 
 func (r CapabilityRevision) Equivalent(other CapabilityRevision) bool {
@@ -93,6 +97,7 @@ func NewRegistry(options ...RegistryOption) Registry {
 		option(r)
 	}
 	r.revision.Digest = capabilityDigest(r.tools)
+	r.revision.ToolDigest = r.revision.Digest
 	return r
 }
 
@@ -120,6 +125,7 @@ func (r *registryImpl) Register(tool BaseTool) error {
 	r.tools[name] = tool
 	r.revision.Sequence++
 	r.revision.Digest = capabilityDigest(r.tools)
+	r.revision.ToolDigest = r.revision.Digest
 	return nil
 }
 

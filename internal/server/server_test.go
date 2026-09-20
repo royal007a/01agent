@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
+	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -26,6 +28,46 @@ type testProvider struct {
 }
 
 type failingProvider struct{}
+
+type countingFailProvider struct{ calls atomic.Int32 }
+
+func (p *countingFailProvider) Generate(context.Context, []schema.Message, []schema.ToolDefinition) (schema.Generation, error) {
+	p.calls.Add(1)
+	return schema.Generation{}, errors.New("provider must not be called during result recovery")
+}
+
+type sessionProvider struct {
+	mu    sync.Mutex
+	calls int
+	t     *testing.T
+}
+
+func (p *sessionProvider) Generate(_ context.Context, messages []schema.Message, _ []schema.ToolDefinition) (schema.Generation, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	switch p.calls {
+	case 1:
+		if messages[len(messages)-1].Role != schema.RoleUser || messages[len(messages)-1].Content != "remember blue" {
+			p.t.Errorf("first session messages=%#v", messages)
+		}
+		return schema.Generation{Message: schema.Message{Content: "remembered blue"}}, nil
+	case 2:
+		seenMemory := false
+		for _, message := range messages {
+			if message.Role == schema.RoleAssistant && message.Content == "remembered blue" {
+				seenMemory = true
+			}
+		}
+		if !seenMemory || messages[len(messages)-1].Role != schema.RoleUser || messages[len(messages)-1].Content != "what color" {
+			p.t.Errorf("second session messages=%#v", messages)
+		}
+		return schema.Generation{Message: schema.Message{Content: "blue"}}, nil
+	default:
+		p.t.Errorf("unexpected provider call %d", p.calls)
+		return schema.Generation{Message: schema.Message{Content: "unexpected"}}, nil
+	}
+}
 
 func (failingProvider) Generate(context.Context, []schema.Message, []schema.ToolDefinition) (schema.Generation, error) {
 	return schema.Generation{}, errors.New("invalid provider credentials")
@@ -188,5 +230,127 @@ func TestBackgroundTaskHTTPStateMachineDeliversTerminalOutput(t *testing.T) {
 	claim, err := inbox.Claim(context.Background(), "run-parent", "turn-parent", 10)
 	if err != nil || len(claim.Items) != 1 || claim.Items[0].Kind != engine.InputTask {
 		t.Fatalf("terminal output not delivered: claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestSessionTurnsPersistAcrossHandlerRestartAndReplayIdempotently(t *testing.T) {
+	workDir := t.TempDir()
+	runDir := t.TempDir()
+	runs, err := runstore.New(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := sessionstore.New(filepath.Join(runDir, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &sessionProvider{t: t}
+	newHandler := func(sessionStore *sessionstore.Store) *Handler {
+		handler, err := New(Config{
+			Token: "secret", WorkDir: workDir, Registry: tools.NewRegistry(), Provider: model,
+			Store: runs, InputQueue: runs, Sessions: sessionStore,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handler
+	}
+	call := func(handler *Handler, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/sessions/chat-1/turns", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	first := call(newHandler(sessions), `{"operation_id":"message-1","prompt":"remember blue"}`)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"content":"remembered blue"`) || !strings.Contains(first.Body.String(), `"cached":false`) {
+		t.Fatalf("first=%d %s", first.Code, first.Body.String())
+	}
+	reopened, err := sessionstore.New(filepath.Join(runDir, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newHandler(reopened)
+	second := call(handler, `{"operation_id":"message-2","prompt":"what color"}`)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"content":"blue"`) || !strings.Contains(second.Body.String(), `"session_revision":4`) {
+		t.Fatalf("second=%d %s", second.Code, second.Body.String())
+	}
+	replayed := call(handler, `{"operation_id":"message-2","prompt":"what color"}`)
+	if replayed.Code != http.StatusOK || !strings.Contains(replayed.Body.String(), `"cached":true`) || !strings.Contains(replayed.Body.String(), `"content":"blue"`) {
+		t.Fatalf("replayed=%d %s", replayed.Code, replayed.Body.String())
+	}
+	model.mu.Lock()
+	calls := model.calls
+	model.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("provider calls=%d want=2", calls)
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, "/v1/sessions/chat-1", nil)
+	getRequest.Header.Set("Authorization", "Bearer secret")
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"operation_id":"message-2"`) || !strings.Contains(getResponse.Body.String(), `"revision":4`) {
+		t.Fatalf("get=%d %s", getResponse.Code, getResponse.Body.String())
+	}
+}
+
+func TestSessionTurnRecoversResultCommittedBeforeSessionBarrier(t *testing.T) {
+	workDir := t.TempDir()
+	runDir := t.TempDir()
+	runs, err := runstore.New(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := sessionstore.New(filepath.Join(runDir, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := sessions.BeginWithSemantics(
+		context.Background(), "chat-recover", "message-recover", "recover me", workDir, "run-recover",
+		`{"thinking":false,"plan_mode":false,"approved_tools":[]}`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	result := engine.RunResult{
+		RunID: "run-recover", Reason: schema.TerminalCompleted,
+		FinalMessage: schema.Message{Role: schema.RoleAssistant, Content: "already complete"},
+		Messages: []schema.Message{
+			{Role: schema.RoleSystem, Content: "system"}, {Role: schema.RoleUser, Content: "recover me"},
+			{Role: schema.RoleAssistant, Content: "already complete"},
+		},
+		Turns: 1, StartedAt: now.Add(-time.Second), CompletedAt: now,
+	}
+	if err := runs.Complete(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	if admission.State.Pending == nil {
+		t.Fatal("expected a pending session turn")
+	}
+
+	model := &countingFailProvider{}
+	handler, err := New(Config{
+		Token: "secret", WorkDir: workDir, Registry: tools.NewRegistry(), Provider: model,
+		Store: runs, InputQueue: runs, Sessions: sessions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/chat-recover/turns", strings.NewReader(`{"operation_id":"message-recover","prompt":"recover me"}`))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"already complete"`) || !strings.Contains(response.Body.String(), `"cached":false`) {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+	if model.calls.Load() != 0 {
+		t.Fatalf("provider calls=%d", model.calls.Load())
+	}
+	state, err := sessions.Get(context.Background(), "chat-recover")
+	if err != nil || state.Pending != nil || len(state.Turns) != 1 || state.Revision != 2 {
+		t.Fatalf("state=%#v err=%v", state, err)
 	}
 }

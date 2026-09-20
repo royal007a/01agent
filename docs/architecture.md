@@ -1,24 +1,34 @@
 # Architecture
 
 ```text
-CLI / HTTP host
+CLI / HTTP host / durable Feishu bridge
        |
        v
-AgentEngine -- bounded loop, compaction, Turn lease, structured events
-  |     |                                      |
-  |     +--> Resilient Provider                +--> RunStore
-  |          (retry/backoff/rate limits)             (canonical history/trace)
-  |                                                    |             |
-  |                                                    v             v
-  |                                               claim/ack inbox   TaskStore
-  |
-  +--------> Registry -- validate, authorize, schedule, execute
-                           |
-                           +--> read_file
-                           +--> write_file / edit_file / bash (double-gated)
-                                                              |
-                                                              v
-                                                    platform sandbox
+SessionStore -- ordered Runs, operation idempotency, per-session lane
+       |
+       v
+Prompt snapshot --> AgentEngine -- bounded loop, compaction, Turn lease, events
+ AGENTS/Skills       |     |                                      |
+                     |     +--> Resilient Provider                +--> RunStore
+                     |          (retry/backoff/rate limits)             (canonical history/trace)
+                     |                                                    |             |
+                     |                                                    v             v
+                     |                                               claim/ack inbox   TaskStore
+                     |
+                     +--> Memory archive <---- tiered compactor
+                     |       |
+                     |       +--> recall_context (session-scoped BM25)
+                     |
+                     +--> PlanStore --> plan.json + PLAN.md/TODO.md
+                     |
+                     +--> Registry -- validate, authorize, schedule, execute
+                                          |
+                                          +--> read_file / read_skill / recall_context
+                                          +--> read_plan / update_plan
+                                          +--> write_file / edit_file / bash (double-gated)
+                                                                             |
+                                                                             v
+                                                                   platform sandbox
                                                        |
 Evaluator <--------------------- consumes replay-validated traces
 ```
@@ -30,6 +40,17 @@ usage budget, repeated-call fingerprints, checkpoints, input claims, and
 terminal reason. At admission it freezes one immutable capability snapshot;
 the provider definitions and physical dispatch use that same revision. Every
 state transition emits a sequenced event with a run ID and timestamp.
+
+`SessionStore` is the ConversationManager above the query loop. It serializes
+one session without blocking unrelated sessions, records a pending operation
+before execution, and commits the new conversation only after a separate Run
+has a durable result. Operation IDs make delivery idempotent; a restart can
+finish the session barrier from a result or resume the Run checkpoint.
+
+`PromptComposer` freezes the base prompt, workspace `AGENTS.md`, and Skill
+catalog for one Run. Skill bodies are available only through `read_skill` and
+are served from the pinned snapshot. Tool, prompt, AGENTS, and Skill digests
+form the capability revision used by checkpoint compatibility and replay.
 
 `Provider` owns wire translation. A wrapper retries only transient transport,
 408/409/429, and 5xx failures, uses bounded exponential backoff, honors
@@ -60,9 +81,23 @@ terminal result is idempotently enqueued to its parent run, and is considered
 consumed only after the parent input claim has a committed revision.
 
 `ContextCompactor` is injected into the loop. The default window compactor
-retains the system/user prefix and recent complete tool-call/result groups,
-then inserts an explicit compaction notice. Checkpoints persist the compacted
-timeline so a resumed run continues from the same durable state.
+first archives raw messages with stable source IDs. It then masks old tool
+results, collapses old assistant prose, head/tail truncates large recent tool
+observations, and retains recent complete tool-call/result groups. A
+session-scoped lexical index powers `recall_context`; returned excerpts are
+bounded so recall cannot immediately overflow the next model request.
+
+`PlanStore` is separate from background task execution. It owns a model-facing
+multi-step plan with operation identity, semantic fingerprint, revision CAS,
+atomic commit, read-back verification, and repairable `PLAN.md`/`TODO.md`
+projections. The explicit Plan Mode switch changes the snapshotted system
+prompt, so resuming a checkpoint under a different mode fails capability
+validation rather than silently changing its control policy.
+
+The Feishu bridge uses the official Channel/WebSocket layer but keeps IM I/O
+outside the engine. The callback durably enqueues and returns; bounded workers
+call the HTTP Session API. Event IDs deduplicate delivery and persisted job
+states are reconciled after restart.
 
 ## Terminal reasons
 
@@ -84,10 +119,11 @@ parse log messages.
 
 ## Evaluation gate
 
-`evals/runtime.json` contains 23 deterministic tasks covering direct answers,
+`evals/runtime.json` contains 28 deterministic tasks covering direct answers,
 single/paginated/parallel reads, recovery paths, loop and budget exits,
 thinking/action separation, compaction, write/edit, Bash, approval denial,
-canonical commits, and queued user/task inputs.
+canonical commits, queued user/task inputs, fuzzy edits, session continuity,
+lazy Skills, archived recall, and persistent Plan state.
 Each case writes and replays its real runtime trace before it is scored. The
 gate currently requires all cases to pass.
 

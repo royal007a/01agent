@@ -15,6 +15,9 @@ import (
 
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
+	"github.com/royal007a/01agent/internal/memory"
+	"github.com/royal007a/01agent/internal/plan"
+	promptcontext "github.com/royal007a/01agent/internal/prompt"
 	"github.com/royal007a/01agent/internal/runstore"
 	agentsandbox "github.com/royal007a/01agent/internal/sandbox"
 	"github.com/royal007a/01agent/internal/schema"
@@ -44,6 +47,7 @@ type Case struct {
 	MaxRepeatedCall int                  `json:"max_repeated_call,omitempty"`
 	TimeoutMS       int                  `json:"timeout_ms,omitempty"`
 	ContextTokens   int                  `json:"context_tokens,omitempty"`
+	History         []schema.Message     `json:"history,omitempty"`
 	Expected        Expected             `json:"expected"`
 }
 
@@ -56,14 +60,17 @@ type ScriptStep struct {
 }
 
 type Expected struct {
-	Reason            schema.TerminalReason `json:"reason"`
-	AnswerContains    string                `json:"answer_contains,omitempty"`
-	ToolSequence      []string              `json:"tool_sequence,omitempty"`
-	MinTurns          int                   `json:"min_turns,omitempty"`
-	MaxTurns          int                   `json:"max_turns,omitempty"`
-	MinCompactions    int                   `json:"min_compactions,omitempty"`
-	MinHistoryCommits int                   `json:"min_history_commits,omitempty"`
-	MinInputClaims    int                   `json:"min_input_claims,omitempty"`
+	Reason             schema.TerminalReason `json:"reason"`
+	AnswerContains     string                `json:"answer_contains,omitempty"`
+	ToolSequence       []string              `json:"tool_sequence,omitempty"`
+	MinTurns           int                   `json:"min_turns,omitempty"`
+	MaxTurns           int                   `json:"max_turns,omitempty"`
+	MinCompactions     int                   `json:"min_compactions,omitempty"`
+	MinHistoryCommits  int                   `json:"min_history_commits,omitempty"`
+	MinInputClaims     int                   `json:"min_input_claims,omitempty"`
+	Files              map[string]string     `json:"files,omitempty"`
+	ContextContains    []string              `json:"context_contains,omitempty"`
+	ToolOutputContains map[string]string     `json:"tool_output_contains,omitempty"`
 }
 
 type CaseResult struct {
@@ -206,8 +213,27 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		policy = tools.ApprovalPolicy{}
 	}
 	registry := tools.NewRegistry(tools.WithPermissionPolicy(policy))
+	archive, err := memory.NewArchive(filepath.Join(artifactsDir, "memory"))
+	if err != nil {
+		return CaseResult{}, err
+	}
+	plans, err := plan.NewStore(filepath.Join(artifactsDir, "plans"))
+	if err != nil {
+		return CaseResult{}, err
+	}
 	if err := registry.Register(readFile); err != nil {
 		return CaseResult{}, err
+	}
+	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+		return CaseResult{}, err
+	}
+	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+		return CaseResult{}, err
+	}
+	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+		if err := registry.Register(tool); err != nil {
+			return CaseResult{}, err
+		}
 	}
 	if item.EnableDangerous {
 		writeFile, err := tools.NewWriteFileTool(workDir)
@@ -235,14 +261,20 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		Timeout: time.Duration(item.TimeoutMS) * time.Millisecond, Store: store, InputQueue: store, RunID: runID,
 	}
 	if item.ContextTokens > 0 {
-		config.Compactor = contextmanager.Window{MaxApproxTokens: item.ContextTokens, ReserveTokens: item.ContextTokens / 5, MinTailMessages: 2}
+		config.Compactor = contextmanager.Window{MaxApproxTokens: item.ContextTokens, ReserveTokens: item.ContextTokens / 5, MinTailMessages: 2, Archive: archive}
 	}
 	agent, err := engine.New(model, registry, config)
 	if err != nil {
 		return CaseResult{}, err
 	}
 	runContext := tools.WithApprovedTools(ctx, item.ApprovedTools)
-	result, runErr := agent.Run(runContext, item.Prompt)
+	var result engine.RunResult
+	var runErr error
+	if len(item.History) > 0 {
+		result, runErr = agent.RunWithHistory(runContext, item.Prompt, item.History)
+	} else {
+		result, runErr = agent.Run(runContext, item.Prompt)
+	}
 	trace, traceErr := store.LoadTrace(result.RunID)
 	if traceErr != nil {
 		return CaseResult{}, traceErr
@@ -251,12 +283,20 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		return CaseResult{}, fmt.Errorf("replay: %w", err)
 	}
 	actualTools := make([]string, 0)
+	callNames := make(map[string]string)
+	toolOutputs := make(map[string][]string)
 	compactions := 0
 	historyCommits := 0
 	inputClaims := 0
 	for _, event := range trace.Events {
 		if event.Type == engine.EventToolStarted {
 			actualTools = append(actualTools, event.ToolCall.Name)
+			callNames[event.ToolCall.ID] = event.ToolCall.Name
+		}
+		if event.Type == engine.EventToolResult {
+			if name := callNames[event.ToolResult.ToolCallID]; name != "" {
+				toolOutputs[name] = append(toolOutputs[name], event.ToolResult.Output)
+			}
 		}
 		if event.Type == engine.EventCompacted {
 			compactions++
@@ -294,6 +334,44 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	if inputClaims < item.Expected.MinInputClaims {
 		failures = append(failures, fmt.Sprintf("input_claims=%d below %d", inputClaims, item.Expected.MinInputClaims))
 	}
+	for name, expectedContent := range item.Expected.Files {
+		path := filepath.Join(workDir, filepath.Clean(name))
+		relative, err := filepath.Rel(workDir, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			failures = append(failures, fmt.Sprintf("expected file path %q escapes workspace", name))
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("expected file %q: %v", name, err))
+			continue
+		}
+		if string(content) != expectedContent {
+			failures = append(failures, fmt.Sprintf("file %q content=%q want=%q", name, content, expectedContent))
+		}
+	}
+	observed := model.Observed()
+	if len(item.Expected.ContextContains) > 0 && len(observed) == 0 {
+		failures = append(failures, "provider observed no context")
+	} else if len(observed) > 0 {
+		for _, required := range item.Expected.ContextContains {
+			found := false
+			for _, message := range observed {
+				if strings.Contains(message.Content, required) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				failures = append(failures, fmt.Sprintf("first provider context does not contain %q", required))
+			}
+		}
+	}
+	for name, required := range item.Expected.ToolOutputContains {
+		if !strings.Contains(strings.Join(toolOutputs[name], "\n"), required) {
+			failures = append(failures, fmt.Sprintf("tool %q output does not contain %q", name, required))
+		}
+	}
 	cost := float64(result.Usage.InputTokens)*suite.InputUSDPerMillion/1_000_000 + float64(result.Usage.OutputTokens)*suite.OutputUSDPerMillion/1_000_000
 	caseResult := CaseResult{
 		ID: item.ID, Passed: len(failures) == 0, Failures: failures, Reason: result.Reason,
@@ -326,10 +404,12 @@ type scriptedProvider struct {
 	steps      []ScriptStep
 	last       ScriptStep
 	repeatLast bool
+	observed   [][]schema.Message
 }
 
-func (p *scriptedProvider) Generate(ctx context.Context, _ []schema.Message, _ []schema.ToolDefinition) (schema.Generation, error) {
+func (p *scriptedProvider) Generate(ctx context.Context, messages []schema.Message, _ []schema.ToolDefinition) (schema.Generation, error) {
 	p.mu.Lock()
+	p.observed = append(p.observed, append([]schema.Message(nil), messages...))
 	if len(p.steps) > 0 {
 		p.last = p.steps[0]
 		p.steps = p.steps[1:]
@@ -352,4 +432,13 @@ func (p *scriptedProvider) Generate(ctx context.Context, _ []schema.Message, _ [
 		return schema.Generation{}, errors.New(step.Error)
 	}
 	return schema.Generation{Message: schema.Message{Content: step.Content, ToolCalls: step.ToolCalls}, Usage: step.Usage}, nil
+}
+
+func (p *scriptedProvider) Observed() []schema.Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.observed) == 0 {
+		return nil
+	}
+	return append([]schema.Message(nil), p.observed[0]...)
 }

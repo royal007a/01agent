@@ -56,6 +56,10 @@ type ReplaySummary struct {
 	ToolResults           int    `json:"tool_results"`
 	CapabilitySnapshots   int    `json:"capability_snapshots"`
 	CapabilityDigest      string `json:"capability_digest,omitempty"`
+	ToolDigest            string `json:"tool_digest,omitempty"`
+	PromptDigest          string `json:"prompt_digest,omitempty"`
+	AgentsDigest          string `json:"agents_digest,omitempty"`
+	SkillsDigest          string `json:"skills_digest,omitempty"`
 	HistoryCommits        int    `json:"history_commits"`
 	LastHistoryRevision   int64  `json:"last_history_revision"`
 	InputClaims           int    `json:"input_claims"`
@@ -89,6 +93,20 @@ func (s *FileStore) Complete(_ context.Context, result engine.RunResult) error {
 		return err
 	}
 	return s.writeAtomic(s.resultPath(result.RunID), result)
+}
+
+func (s *FileStore) LoadResult(_ context.Context, runID string) (engine.RunResult, error) {
+	if err := validateID(runID); err != nil {
+		return engine.RunResult{}, err
+	}
+	var result engine.RunResult
+	if err := readJSON(s.resultPath(runID), &result); err != nil {
+		return engine.RunResult{}, fmt.Errorf("load result %q: %w", runID, err)
+	}
+	if result.RunID != runID || result.Reason == "" || result.CompletedAt.IsZero() {
+		return engine.RunResult{}, fmt.Errorf("load result %q: invalid result identity", runID)
+	}
+	return result, nil
 }
 
 func (s *FileStore) LoadCheckpoint(_ context.Context, runID string) (engine.Checkpoint, error) {
@@ -296,6 +314,19 @@ func Replay(trace Trace) (ReplaySummary, error) {
 			}
 			summary.CapabilityDigest = digest
 			summary.CapabilitySnapshots++
+			toolDigest, hasTool := metadataString(event.Metadata, "tool_digest")
+			promptDigest, hasPrompt := metadataString(event.Metadata, "prompt_digest")
+			agentsDigest, hasAgents := metadataString(event.Metadata, "agents_digest")
+			skillsDigest, hasSkills := metadataString(event.Metadata, "skills_digest")
+			if hasTool || hasPrompt || hasAgents || hasSkills {
+				if !hasTool || !safeFingerprint.MatchString(toolDigest) || !hasPrompt || !safeFingerprint.MatchString(promptDigest) || !hasSkills || !safeFingerprint.MatchString(skillsDigest) || (agentsDigest != "" && !safeFingerprint.MatchString(agentsDigest)) {
+					return ReplaySummary{}, errors.New("capability snapshot has invalid component digests")
+				}
+				summary.ToolDigest = toolDigest
+				summary.PromptDigest = promptDigest
+				summary.AgentsDigest = agentsDigest
+				summary.SkillsDigest = skillsDigest
+			}
 		case engine.EventCommitted:
 			operationID, operationOK := metadataString(event.Metadata, "operation_id")
 			fingerprint, fingerprintOK := metadataString(event.Metadata, "fingerprint")
@@ -356,6 +387,12 @@ func Replay(trace Trace) (ReplaySummary, error) {
 	}
 	if summary.CapabilityDigest != "" && trace.Result.Capability.Digest != summary.CapabilityDigest {
 		return ReplaySummary{}, errors.New("result capability does not match trace snapshot")
+	}
+	if summary.ToolDigest != "" {
+		capability := trace.Result.Capability
+		if capability.ToolDigest != summary.ToolDigest || capability.PromptDigest != summary.PromptDigest || capability.AgentsDigest != summary.AgentsDigest || capability.SkillsDigest != summary.SkillsDigest {
+			return ReplaySummary{}, errors.New("result capability components do not match trace snapshot")
+		}
 	}
 	if summary.HistoryCommits > 0 && trace.Result.HistoryRevision != summary.LastHistoryRevision {
 		return ReplaySummary{}, fmt.Errorf("result history revision %d does not match trace revision %d", trace.Result.HistoryRevision, summary.LastHistoryRevision)

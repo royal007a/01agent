@@ -36,6 +36,7 @@ const (
 	RiskWrite    ToolRisk = "write"
 	RiskExecute  ToolRisk = "execute"
 	RiskExternal ToolRisk = "external"
+	RiskState    ToolRisk = "state"
 )
 
 // ToolDefinition is exposed to providers and also drives registry policy.

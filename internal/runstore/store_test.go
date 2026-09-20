@@ -40,9 +40,13 @@ func TestFileStoreCheckpointTraceAndReplay(t *testing.T) {
 	if err != nil || ack.Revision != 1 {
 		t.Fatal(err)
 	}
-	result := engine.RunResult{RunID: runID, Reason: schema.TerminalCompleted}
+	result := engine.RunResult{RunID: runID, Reason: schema.TerminalCompleted, CompletedAt: time.Now().UTC()}
 	if err := store.Complete(context.Background(), result); err != nil {
 		t.Fatal(err)
+	}
+	loadedResult, err := store.LoadResult(context.Background(), runID)
+	if err != nil || loadedResult.RunID != runID || loadedResult.Reason != schema.TerminalCompleted {
+		t.Fatalf("result=%#v err=%v", loadedResult, err)
 	}
 	loaded, err := store.LoadCheckpoint(context.Background(), runID)
 	if err != nil || loaded.Sequence != 3 || loaded.HistoryRevision != 1 {

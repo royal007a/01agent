@@ -6,6 +6,7 @@ build:
 	mkdir -p bin
 	go build -trimpath -o bin/01agent ./cmd/01agent
 	go build -trimpath -o bin/01agentd ./cmd/01agentd
+	go build -trimpath -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -trimpath -o bin/01agent-eval ./cmd/01agent-eval
 	go build -trimpath -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -trimpath -o bin/01agent-sandbox ./cmd/01agent-sandbox
@@ -24,10 +25,11 @@ verify:
 	mkdir -p bin
 	go build -o bin/01agent ./cmd/01agent
 	go build -o bin/01agentd ./cmd/01agentd
+	go build -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -o bin/01agent-eval ./cmd/01agent-eval
 	go build -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -o bin/01agent-sandbox ./cmd/01agent-sandbox
 	$(MAKE) eval
 
 clean:
-	rm -f bin/01agent bin/01agentd bin/01agent-eval bin/01agent-replay bin/01agent-sandbox coverage.out
+	rm -f bin/01agent bin/01agentd bin/01agent-feishu bin/01agent-eval bin/01agent-replay bin/01agent-sandbox coverage.out

@@ -22,7 +22,7 @@ func WithApprovedTools(ctx context.Context, names []string) context.Context {
 type ApprovalPolicy struct{}
 
 func (ApprovalPolicy) CanUse(ctx context.Context, definition schema.ToolDefinition, _ json.RawMessage) PermissionDecision {
-	if definition.Risk == schema.RiskRead {
+	if definition.Risk == schema.RiskRead || definition.Risk == schema.RiskState {
 		return PermissionDecision{Allowed: true}
 	}
 	approved, _ := ctx.Value(approvalKey{}).(map[string]bool)

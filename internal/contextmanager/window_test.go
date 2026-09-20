@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/royal007a/01agent/internal/memory"
+	"github.com/royal007a/01agent/internal/runtimecontext"
 	"github.com/royal007a/01agent/internal/schema"
 )
 
@@ -34,6 +36,41 @@ func TestWindowCompactsAndPreservesToolPair(t *testing.T) {
 	}
 	if call != result {
 		t.Fatalf("tool pair was split: call=%v result=%v", call, result)
+	}
+}
+
+func TestWindowArchivesRawDetailsBeforeTieredCompaction(t *testing.T) {
+	archive, err := memory.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := "codename ORION " + strings.Repeat("detail ", 300)
+	messages := []schema.Message{
+		{Role: schema.RoleSystem, Content: "system"},
+		{Role: schema.RoleUser, Content: "task"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "c1", Name: "read_file"}}},
+		{Role: schema.RoleTool, ToolCallID: "c1", Content: large},
+		{Role: schema.RoleAssistant, Content: strings.Repeat("reasoning ", 200)},
+		{Role: schema.RoleUser, Content: "what was the codename?"},
+	}
+	ctx := runtimecontext.WithMetadata(context.Background(), runtimecontext.Metadata{Scope: "session", RunID: "run", Turn: 3})
+	compacted, changed, err := (Window{
+		MaxApproxTokens: 240, ReserveTokens: 40, MinTailMessages: 2,
+		RecentMessages: 2, MaxToolBytes: 200, Archive: archive,
+	}).Compact(ctx, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || len(compacted) >= len(messages) || !strings.Contains(compacted[1].Content, "recall_context") {
+		t.Fatalf("compacted=%#v changed=%v", compacted, changed)
+	}
+	results, err := archive.Search(context.Background(), "session", "codename", 5)
+	found := false
+	for _, result := range results {
+		found = found || strings.Contains(result.Content, "ORION")
+	}
+	if err != nil || !found {
+		t.Fatalf("results=%#v err=%v", results, err)
 	}
 }
 

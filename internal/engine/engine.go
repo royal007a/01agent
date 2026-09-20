@@ -13,7 +13,9 @@ import (
 	"sync"
 	"time"
 
+	promptcontext "github.com/royal007a/01agent/internal/prompt"
 	"github.com/royal007a/01agent/internal/provider"
+	"github.com/royal007a/01agent/internal/runtimecontext"
 	"github.com/royal007a/01agent/internal/schema"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -22,10 +24,19 @@ const defaultSystemPrompt = `You are 01agent, a careful coding assistant operati
 Use tools when facts from the workspace are required. Treat tool errors as observations and correct recoverable mistakes.
 Do not repeat an equivalent tool call after it has already returned the needed result. When the task is complete, respond with a concise final answer and no tool calls.`
 
+const planModePrompt = `
+
+# Plan mode
+This run is a long-lived multi-step task. Externalize its objective and progress with read_plan and update_plan instead of relying on the context window.
+At the beginning, call read_plan. If no plan exists, create one with update_plan using expected_revision 0. If it exists, continue from its first pending or in-progress step and respect its current canonical content.
+After completing or blocking a step, immediately read the current revision and update the canonical plan with a new operation_id. Never reuse an operation_id for different content and never guess through a revision conflict.
+The structured plan is authoritative; PLAN.md and TODO.md are human-readable projections. Thinking is still required for local decisions and is not replaced by the plan.`
+
 type Config struct {
 	WorkDir         string
 	SystemPrompt    string
 	EnableThinking  bool
+	PlanMode        bool
 	MaxTurns        int
 	MaxTokens       int64
 	MaxRepeatedCall int
@@ -35,6 +46,8 @@ type Config struct {
 	Store           RunStore
 	Compactor       ContextCompactor
 	InputQueue      InputQueue
+	PromptComposer  promptcontext.Composer
+	MemoryScope     string
 }
 
 type EventType string
@@ -77,6 +90,7 @@ type Checkpoint struct {
 	LeaseID              string                   `json:"lease_id"`
 	Prompt               string                   `json:"prompt"`
 	WorkDir              string                   `json:"work_dir"`
+	MemoryScope          string                   `json:"memory_scope,omitempty"`
 	Capability           tools.CapabilityRevision `json:"capability"`
 	Messages             []schema.Message         `json:"messages"`
 	Turn                 int                      `json:"turn"`
@@ -133,6 +147,7 @@ type RunResult struct {
 	Admission       int                      `json:"admission"`
 	Capability      tools.CapabilityRevision `json:"capability"`
 	HistoryRevision int64                    `json:"history_revision"`
+	MemoryScope     string                   `json:"memory_scope,omitempty"`
 	Reason          schema.TerminalReason    `json:"reason"`
 	FinalMessage    schema.Message           `json:"final_message"`
 	Messages        []schema.Message         `json:"messages"`
@@ -170,6 +185,12 @@ func New(model provider.LLMProvider, registry tools.Registry, config Config) (*A
 	if strings.TrimSpace(config.SystemPrompt) == "" {
 		config.SystemPrompt = defaultSystemPrompt
 	}
+	if config.PlanMode {
+		config.SystemPrompt = strings.TrimSpace(config.SystemPrompt) + planModePrompt
+	}
+	if config.PromptComposer == nil {
+		config.PromptComposer = promptcontext.FilesystemComposer{}
+	}
 	if config.MaxTurns <= 0 {
 		config.MaxTurns = 32
 	}
@@ -183,11 +204,44 @@ func (e *AgentEngine) Run(parent context.Context, userPrompt string) (RunResult,
 	if strings.TrimSpace(userPrompt) == "" {
 		return RunResult{}, errors.New("engine: user prompt is empty")
 	}
+	promptSnapshot, err := e.config.PromptComposer.Snapshot(parent, e.config.WorkDir, e.config.SystemPrompt)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("engine: compose prompt: %w", err)
+	}
 	messages := []schema.Message{
-		{Role: schema.RoleSystem, Content: e.config.SystemPrompt + "\n\nWorkspace: " + e.config.WorkDir},
+		{Role: schema.RoleSystem, Content: promptSnapshot.SystemPrompt},
 		{Role: schema.RoleUser, Content: userPrompt},
 	}
-	return e.run(parent, userPrompt, messages, nil)
+	return e.run(parent, userPrompt, messages, promptSnapshot, nil)
+}
+
+// RunWithHistory executes one new user turn on top of conversation state owned
+// by a ConversationManager. The engine still owns only this query-loop run;
+// callers remain responsible for serializing and durably committing sessions.
+func (e *AgentEngine) RunWithHistory(parent context.Context, userPrompt string, history []schema.Message) (RunResult, error) {
+	userPrompt = strings.TrimSpace(userPrompt)
+	if userPrompt == "" {
+		return RunResult{}, errors.New("engine: user prompt is empty")
+	}
+	if len(history) == 0 {
+		return e.Run(parent, userPrompt)
+	}
+	if history[0].Role != schema.RoleSystem || strings.TrimSpace(history[0].Content) == "" {
+		return RunResult{}, errors.New("engine: conversation history must start with a non-empty system message")
+	}
+	for index, message := range history[1:] {
+		if message.Role == schema.RoleSystem {
+			return RunResult{}, fmt.Errorf("engine: conversation history contains a system message at index %d", index+1)
+		}
+	}
+	promptSnapshot, err := e.config.PromptComposer.Snapshot(parent, e.config.WorkDir, e.config.SystemPrompt)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("engine: compose prompt: %w", err)
+	}
+	messages := append([]schema.Message(nil), history...)
+	messages[0].Content = promptSnapshot.SystemPrompt
+	messages = append(messages, schema.Message{Role: schema.RoleUser, Content: userPrompt})
+	return e.run(parent, userPrompt, messages, promptSnapshot, nil)
 }
 
 func (e *AgentEngine) Resume(parent context.Context, checkpoint Checkpoint) (RunResult, error) {
@@ -200,24 +254,40 @@ func (e *AgentEngine) Resume(parent context.Context, checkpoint Checkpoint) (Run
 	if checkpoint.Reason == schema.TerminalCompleted {
 		return RunResult{}, errors.New("engine: completed checkpoint cannot be resumed")
 	}
+	promptSnapshot, err := e.config.PromptComposer.Snapshot(parent, e.config.WorkDir, e.config.SystemPrompt)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("engine: compose prompt: %w", err)
+	}
 	e.config.RunID = checkpoint.RunID
-	return e.run(parent, checkpoint.Prompt, append([]schema.Message(nil), checkpoint.Messages...), &checkpoint)
+	return e.run(parent, checkpoint.Prompt, append([]schema.Message(nil), checkpoint.Messages...), promptSnapshot, &checkpoint)
 }
 
-func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []schema.Message, restored *Checkpoint) (RunResult, error) {
+func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []schema.Message, promptSnapshot promptcontext.Snapshot, restored *Checkpoint) (RunResult, error) {
 	ctx := parent
 	cancel := func() {}
 	if e.config.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(parent, e.config.Timeout)
 	}
 	defer cancel()
+	ctx = promptcontext.WithSnapshot(ctx, promptSnapshot)
 
 	runID := strings.TrimSpace(e.config.RunID)
 	if runID == "" {
 		runID = newRunID()
 	}
+	memoryScope := strings.TrimSpace(e.config.MemoryScope)
+	if restored != nil && restored.MemoryScope != "" {
+		if memoryScope != "" && memoryScope != restored.MemoryScope {
+			return RunResult{}, fmt.Errorf("engine: checkpoint memory scope %q does not match %q", restored.MemoryScope, memoryScope)
+		}
+		memoryScope = restored.MemoryScope
+	}
+	if memoryScope == "" {
+		memoryScope = runID
+	}
+	ctx = runtimecontext.WithMetadata(ctx, runtimecontext.Metadata{Scope: memoryScope, RunID: runID})
 	runtime := e.registry.Snapshot()
-	capability := runtime.Revision()
+	capability := combinedCapability(runtime.Revision(), promptSnapshot)
 	turnID := newID("turn")
 	admission := 1
 	completedTurns := 0
@@ -258,7 +328,7 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	startedAt := time.Now().UTC()
 	result := RunResult{
 		RunID: runID, TurnID: turnID, Admission: admission, Capability: capability,
-		HistoryRevision: historyRevision, Messages: messages, Usage: usage, StartedAt: startedAt,
+		HistoryRevision: historyRevision, MemoryScope: memoryScope, Messages: messages, Usage: usage, StartedAt: startedAt,
 	}
 	repeatedCalls := make(map[[32]byte]int)
 	for key, count := range repeatedState {
@@ -303,7 +373,7 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		operationID := fmt.Sprintf("%s/op-%06d/%s", runID, operationSequence, kind)
 		checkpoint := Checkpoint{
 			Version: 2, RunID: runID, TurnID: turnID, Admission: admission, LeaseID: lease.ID,
-			Prompt: userPrompt, WorkDir: e.config.WorkDir, Capability: capability,
+			Prompt: userPrompt, WorkDir: e.config.WorkDir, MemoryScope: memoryScope, Capability: capability,
 			Messages: append([]schema.Message(nil), messages...), Turn: turn,
 			// Reserve the trace events that follow this barrier. If append fails
 			// after the canonical commit, a resumed admission starts after the
@@ -372,7 +442,8 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		return finish(schema.TerminalPersistenceError, err)
 	}
 	if err := emit(Event{Type: EventCapability, Turn: completedTurns, Metadata: map[string]any{
-		"sequence": capability.Sequence, "digest": capability.Digest,
+		"sequence": capability.Sequence, "digest": capability.Digest, "tool_digest": capability.ToolDigest,
+		"prompt_digest": capability.PromptDigest, "agents_digest": capability.AgentsDigest, "skills_digest": capability.SkillsDigest,
 	}}); err != nil {
 		return finish(schema.TerminalPersistenceError, err)
 	}
@@ -421,7 +492,8 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		}
 
 		if e.config.Compactor != nil {
-			compacted, changed, err := e.config.Compactor.Compact(ctx, messages)
+			compactContext := runtimecontext.WithMetadata(ctx, runtimecontext.Metadata{Scope: memoryScope, RunID: runID, Turn: turn})
+			compacted, changed, err := e.config.Compactor.Compact(compactContext, messages)
 			if err != nil {
 				return finish(schema.TerminalFatalToolError, fmt.Errorf("compact context: %w", err))
 			}
@@ -553,6 +625,25 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 	}
 
 	return finish(schema.TerminalMaxTurns, nil)
+}
+
+func combinedCapability(toolRevision tools.CapabilityRevision, snapshot promptcontext.Snapshot) tools.CapabilityRevision {
+	toolDigest := toolRevision.ToolDigest
+	if toolDigest == "" {
+		toolDigest = toolRevision.Digest
+	}
+	manifest := struct {
+		Tool   string `json:"tool"`
+		Prompt string `json:"prompt"`
+		Agents string `json:"agents,omitempty"`
+		Skills string `json:"skills"`
+	}{toolDigest, snapshot.Digest, snapshot.AgentsDigest, snapshot.SkillsDigest}
+	encoded, _ := json.Marshal(manifest)
+	digest := sha256.Sum256(encoded)
+	return tools.CapabilityRevision{
+		Sequence: toolRevision.Sequence, Digest: hex.EncodeToString(digest[:]), ToolDigest: toolDigest,
+		PromptDigest: snapshot.Digest, AgentsDigest: snapshot.AgentsDigest, SkillsDigest: snapshot.SkillsDigest,
+	}
 }
 
 func (e *AgentEngine) providerFailure(result RunResult, messages []schema.Message, err error) (RunResult, error) {

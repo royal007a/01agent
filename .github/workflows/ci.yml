@@ -27,6 +27,8 @@ jobs:
         run: go build -o /tmp/01agent ./cmd/01agent
       - name: Build HTTP service
         run: go build -o /tmp/01agentd ./cmd/01agentd
+      - name: Build Feishu bridge
+        run: go build -o /tmp/01agent-feishu ./cmd/01agent-feishu
       - name: Build evaluator and replay tool
         run: |
           go build -o /tmp/01agent-eval ./cmd/01agent-eval

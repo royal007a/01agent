@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/schema"
+	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
 )
@@ -28,6 +31,7 @@ type Config struct {
 	Provider         provider.LLMProvider
 	Registry         tools.Registry
 	EnableThinking   bool
+	PlanMode         bool
 	MaxTurns         int
 	MaxTokens        int64
 	MaxRepeatedCall  int
@@ -38,6 +42,7 @@ type Config struct {
 	InputQueue       engine.InputQueue
 	InputEnqueuer    engine.InputEnqueuer
 	Tasks            *taskstore.Store
+	Sessions         *sessionstore.Store
 	ReadinessTTL     time.Duration
 	ReadinessTimeout time.Duration
 }
@@ -55,7 +60,16 @@ type runRequest struct {
 	RunID         string   `json:"run_id,omitempty"`
 	Prompt        string   `json:"prompt"`
 	Thinking      *bool    `json:"thinking,omitempty"`
+	PlanMode      *bool    `json:"plan_mode,omitempty"`
 	ResumeRunID   string   `json:"resume_run_id,omitempty"`
+	ApprovedTools []string `json:"approved_tools,omitempty"`
+}
+
+type sessionTurnRequest struct {
+	OperationID   string   `json:"operation_id"`
+	Prompt        string   `json:"prompt"`
+	Thinking      *bool    `json:"thinking,omitempty"`
+	PlanMode      *bool    `json:"plan_mode,omitempty"`
 	ApprovedTools []string `json:"approved_tools,omitempty"`
 }
 
@@ -116,10 +130,193 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("GET /readyz", handler.ready)
 	handler.mux.HandleFunc("POST /v1/runs", handler.authorize(handler.run))
 	handler.mux.HandleFunc("POST /v1/runs/{runID}/inputs", handler.authorize(handler.enqueueInput))
+	handler.mux.HandleFunc("POST /v1/sessions/{sessionID}/turns", handler.authorize(handler.sessionTurn))
+	handler.mux.HandleFunc("GET /v1/sessions/{sessionID}", handler.authorize(handler.getSession))
 	handler.mux.HandleFunc("POST /v1/tasks", handler.authorize(handler.createTask))
 	handler.mux.HandleFunc("GET /v1/tasks/{taskID}", handler.authorize(handler.getTask))
 	handler.mux.HandleFunc("POST /v1/tasks/{taskID}/events", handler.authorize(handler.taskEvent))
 	return handler, nil
+}
+
+type resultLoader interface {
+	LoadResult(context.Context, string) (engine.RunResult, error)
+}
+
+func (h *Handler) sessionTurn(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Provider == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "model provider is not configured"})
+		return
+	}
+	if h.config.Sessions == nil || h.config.Store == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "session and run stores are not configured"})
+		return
+	}
+	results, ok := h.config.Store.(resultLoader)
+	if !ok {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "run store does not support durable result recovery"})
+		return
+	}
+	var input sessionTurnRequest
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	sessionID := strings.TrimSpace(request.PathValue("sessionID"))
+	input.OperationID = strings.TrimSpace(input.OperationID)
+	input.Prompt = strings.TrimSpace(input.Prompt)
+	if sessionID == "" || input.OperationID == "" || input.Prompt == "" {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "session_id, operation_id, and prompt are required"})
+		return
+	}
+	if len(input.Prompt) > 32_768 {
+		writeJSON(writer, http.StatusRequestEntityTooLarge, errorResponse{Error: "prompt exceeds 32768 bytes"})
+		return
+	}
+	if err := h.validateApprovals(input.ApprovedTools); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	thinking := h.config.EnableThinking
+	if input.Thinking != nil {
+		thinking = *input.Thinking
+	}
+	planMode := h.config.PlanMode
+	if input.PlanMode != nil {
+		planMode = *input.PlanMode
+	}
+	approvedTools := append([]string{}, input.ApprovedTools...)
+	sort.Strings(approvedTools)
+	semanticAttributes, _ := json.Marshal(struct {
+		Thinking      bool     `json:"thinking"`
+		PlanMode      bool     `json:"plan_mode"`
+		ApprovedTools []string `json:"approved_tools"`
+	}{thinking, planMode, approvedTools})
+	release, err := h.config.Sessions.Acquire(request.Context(), sessionID)
+	if err != nil {
+		writeJSON(writer, http.StatusRequestTimeout, errorResponse{Error: err.Error()})
+		return
+	}
+	defer release()
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	default:
+		writer.Header().Set("Retry-After", "1")
+		writeJSON(writer, http.StatusTooManyRequests, errorResponse{Error: "concurrency limit reached"})
+		return
+	}
+
+	admission, err := h.config.Sessions.BeginWithSemantics(
+		request.Context(), sessionID, input.OperationID, input.Prompt, h.config.WorkDir, "", string(semanticAttributes),
+	)
+	if err != nil {
+		status := http.StatusConflict
+		if !errors.Is(err, sessionstore.ErrBusy) && !errors.Is(err, sessionstore.ErrConflict) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(writer, status, errorResponse{Error: err.Error()})
+		return
+	}
+	if admission.Cached != nil {
+		result, err := results.LoadResult(request.Context(), admission.Cached.RunID)
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "load cached session result: " + err.Error()})
+			return
+		}
+		writeJSON(writer, statusFor(result.Reason), map[string]any{
+			"result": result, "session_id": sessionID, "session_revision": admission.State.Revision, "cached": true,
+		})
+		return
+	}
+
+	agent, err := h.newAgent(thinking, planMode, admission.Pending.RunID, sessionID)
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	runContext := tools.WithApprovedTools(request.Context(), input.ApprovedTools)
+	var result engine.RunResult
+	var runErr error
+	if admission.Resuming {
+		result, err = results.LoadResult(runContext, admission.Pending.RunID)
+		if err == nil {
+			// The query loop committed its result before the process stopped; only
+			// the session commit barrier remains.
+		} else if !errors.Is(err, os.ErrNotExist) {
+			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "load pending run result: " + err.Error()})
+			return
+		} else {
+			checkpoint, checkpointErr := h.config.Store.LoadCheckpoint(runContext, admission.Pending.RunID)
+			if checkpointErr == nil {
+				result, runErr = agent.Resume(runContext, checkpoint)
+			} else if errors.Is(checkpointErr, os.ErrNotExist) {
+				result, runErr = agent.RunWithHistory(runContext, admission.Pending.Prompt, admission.State.Messages)
+			} else {
+				writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "load pending checkpoint: " + checkpointErr.Error()})
+				return
+			}
+		}
+	} else {
+		result, runErr = agent.RunWithHistory(runContext, admission.Pending.Prompt, admission.State.Messages)
+	}
+	if result.RunID == "" || result.CompletedAt.IsZero() {
+		response := map[string]any{"result": result, "session_id": sessionID}
+		if runErr != nil {
+			response["error"] = runErr.Error()
+		}
+		writeJSON(writer, statusFor(result.Reason), response)
+		return
+	}
+	state, commitErr := h.config.Sessions.Commit(context.WithoutCancel(request.Context()), sessionID, input.OperationID, admission.State.Revision, result)
+	if commitErr != nil {
+		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "commit session turn: " + commitErr.Error()})
+		return
+	}
+	response := map[string]any{
+		"result": result, "session_id": sessionID, "session_revision": state.Revision, "cached": false,
+	}
+	if runErr != nil {
+		response["error"] = runErr.Error()
+	}
+	writeJSON(writer, statusFor(result.Reason), response)
+}
+
+func (h *Handler) getSession(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Sessions == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "session store is not configured"})
+		return
+	}
+	state, err := h.config.Sessions.Get(request.Context(), strings.TrimSpace(request.PathValue("sessionID")))
+	if err != nil {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"session": state})
+}
+
+func (h *Handler) newAgent(thinking, planMode bool, runID, memoryScope string) (*engine.AgentEngine, error) {
+	return engine.New(h.config.Provider, h.config.Registry, engine.Config{
+		WorkDir: h.config.WorkDir, EnableThinking: thinking, PlanMode: planMode, MaxTurns: h.config.MaxTurns,
+		MaxTokens: h.config.MaxTokens, MaxRepeatedCall: h.config.MaxRepeatedCall,
+		Timeout: h.config.RunTimeout, Store: h.config.Store, Compactor: h.config.Compactor,
+		InputQueue: h.config.InputQueue, RunID: runID, MemoryScope: memoryScope,
+	})
+}
+
+func (h *Handler) validateApprovals(names []string) error {
+	if len(names) > 16 {
+		return errors.New("approved_tools exceeds 16 entries")
+	}
+	available := make(map[string]bool)
+	for _, definition := range h.config.Registry.GetAvailableTools() {
+		available[definition.Name] = true
+	}
+	for _, name := range names {
+		if !available[name] {
+			return errors.New("cannot approve unavailable tool: " + name)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -205,10 +402,15 @@ func (h *Handler) run(writer http.ResponseWriter, request *http.Request) {
 	if input.Thinking != nil {
 		thinking = *input.Thinking
 	}
+	planMode := h.config.PlanMode
+	if input.PlanMode != nil {
+		planMode = *input.PlanMode
+	}
 
 	agent, err := engine.New(h.config.Provider, h.config.Registry, engine.Config{
 		WorkDir:         h.config.WorkDir,
 		EnableThinking:  thinking,
+		PlanMode:        planMode,
 		MaxTurns:        h.config.MaxTurns,
 		MaxTokens:       h.config.MaxTokens,
 		MaxRepeatedCall: h.config.MaxRepeatedCall,

@@ -18,11 +18,11 @@ func TestParseFlags(t *testing.T) {
 	t.Setenv("AGENT_PROVIDER", "claude")
 	t.Setenv("AGENT_MODEL", "model-from-env")
 	var stderr bytes.Buffer
-	config, prompt, err := parseFlags([]string{"--thinking", "--timeout", "2s", "inspect", "the", "repo"}, &stderr)
+	config, prompt, err := parseFlags([]string{"--thinking", "--plan-mode", "--timeout", "2s", "inspect", "the", "repo"}, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.provider != "claude" || config.model != "model-from-env" || !config.thinking || config.timeout != 2*time.Second {
+	if config.provider != "claude" || config.model != "model-from-env" || !config.thinking || !config.planMode || config.timeout != 2*time.Second {
 		t.Fatalf("config = %#v", config)
 	}
 	if prompt != "inspect the repo" {

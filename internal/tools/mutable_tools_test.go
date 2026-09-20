@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +71,118 @@ func TestEditRejectsAmbiguousMatch(t *testing.T) {
 	_, err = tool.Execute(context.Background(), json.RawMessage(`{"path":"x.txt","old_text":"x","new_text":"y"}`))
 	if err == nil || !strings.Contains(err.Error(), "matched 2 times") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestEditFuzzyMatchingLevelsPreserveFileConventions(t *testing.T) {
+	tests := []struct {
+		name     string
+		original string
+		oldText  string
+		newText  string
+		want     string
+		level    string
+	}{
+		{
+			name: "newline", original: "first\r\nsecond\r\n", oldText: "first\nsecond", newText: "one\ntwo",
+			want: "one\r\ntwo\r\n", level: "newline",
+		},
+		{
+			name: "outer blank lines", original: "before\nvalue\nafter\n", oldText: "\n\nvalue\n\n", newText: "changed",
+			want: "before\nchanged\nafter\n", level: "outer_blank_lines",
+		},
+		{
+			name: "indentation", original: "func run() {\n        if ready {\n                start()\n        }\n}\n",
+			oldText: "if ready {\nstart()\n}", newText: "if ready {\n    stop()\n}",
+			want: "func run() {\n        if ready {\n            stop()\n        }\n}\n", level: "indentation",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			path := filepath.Join(workDir, "target.txt")
+			if err := os.WriteFile(path, []byte(test.original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tool, err := NewEditFileTool(workDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			arguments, _ := json.Marshal(editFileArgs{Path: "target.txt", OldText: test.oldText, NewText: test.newText})
+			result, err := tool.Execute(context.Background(), arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result, fmt.Sprintf(`"match_level":%q`, test.level)) {
+				t.Fatalf("result=%s", result)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != test.want {
+				t.Fatalf("content=%q want=%q err=%v", content, test.want, err)
+			}
+		})
+	}
+}
+
+func TestEditFuzzyMatchMustRemainUnique(t *testing.T) {
+	workDir := t.TempDir()
+	original := "  if ready {\n    same()\n  }\n\n    if ready {\n      same()\n    }\n"
+	if err := os.WriteFile(filepath.Join(workDir, "x.txt"), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewEditFileTool(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), json.RawMessage(`{"path":"x.txt","old_text":"if ready {\nsame()\n}","new_text":"changed()"}`))
+	var toolErr *Error
+	if !errors.As(err, &toolErr) || toolErr.Code != "ambiguous_match" || !strings.Contains(toolErr.Message, "indentation") {
+		t.Fatalf("error=%#v", err)
+	}
+	content, readErr := os.ReadFile(filepath.Join(workDir, "x.txt"))
+	if readErr != nil || string(content) != original {
+		t.Fatalf("ambiguous edit changed file: content=%q err=%v", content, readErr)
+	}
+}
+
+func TestEditReplaceAllDoesNotUseFuzzyMatching(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "x.txt"), []byte("  value\n  next\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewEditFileTool(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), json.RawMessage(`{"path":"x.txt","old_text":"value\nnext","new_text":"changed","replace_all":true}`))
+	var toolErr *Error
+	if !errors.As(err, &toolErr) || toolErr.Code != "no_match" {
+		t.Fatalf("error=%#v", err)
+	}
+}
+
+func TestEditRejectsStaleExpectedDigest(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "x.txt")
+	if err := os.WriteFile(path, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewEditFileTool(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := sha256.Sum256([]byte("stale"))
+	arguments, _ := json.Marshal(editFileArgs{
+		Path: "x.txt", OldText: "current", NewText: "updated", ExpectedSHA256: fmt.Sprintf("%x", stale),
+	})
+	_, err = tool.Execute(context.Background(), arguments)
+	var toolErr *Error
+	if !errors.As(err, &toolErr) || toolErr.Code != "edit_conflict" || !toolErr.Retryable {
+		t.Fatalf("error=%#v", err)
+	}
+	content, readErr := os.ReadFile(path)
+	if readErr != nil || string(content) != "current" {
+		t.Fatalf("stale edit changed file: content=%q err=%v", content, readErr)
 	}
 }
 

@@ -16,6 +16,9 @@ import (
 
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
+	"github.com/royal007a/01agent/internal/memory"
+	"github.com/royal007a/01agent/internal/plan"
+	promptcontext "github.com/royal007a/01agent/internal/prompt"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
@@ -31,6 +34,7 @@ type cliConfig struct {
 	model              string
 	workDir            string
 	thinking           bool
+	planMode           bool
 	showThinking       bool
 	jsonOutput         bool
 	showVersion        bool
@@ -82,6 +86,16 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "01agent: initialize run store: %v\n", err)
 		return 2
 	}
+	archive, err := memory.NewArchive(filepath.Join(store.Dir(), "memory"))
+	if err != nil {
+		fmt.Fprintf(stderr, "01agent: initialize memory archive: %v\n", err)
+		return 2
+	}
+	plans, err := plan.NewStore(filepath.Join(store.Dir(), "plans"))
+	if err != nil {
+		fmt.Fprintf(stderr, "01agent: initialize plan store: %v\n", err)
+		return 2
+	}
 	var checkpoint engine.Checkpoint
 	if config.resumeRunID != "" {
 		checkpoint, err = store.LoadCheckpoint(context.Background(), config.resumeRunID)
@@ -108,6 +122,20 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	if err := registry.Register(readFile); err != nil {
 		fmt.Fprintf(stderr, "01agent: register read_file: %v\n", err)
 		return 2
+	}
+	if err := registry.Register(promptcontext.NewReadSkillTool()); err != nil {
+		fmt.Fprintf(stderr, "01agent: register read_skill: %v\n", err)
+		return 2
+	}
+	if err := registry.Register(memory.NewRecallTool(archive)); err != nil {
+		fmt.Fprintf(stderr, "01agent: register recall_context: %v\n", err)
+		return 2
+	}
+	for _, tool := range []tools.BaseTool{plan.NewReadTool(plans), plan.NewUpdateTool(plans)} {
+		if err := registry.Register(tool); err != nil {
+			fmt.Fprintf(stderr, "01agent: register %s: %v\n", tool.Name(), err)
+			return 2
+		}
 	}
 	if config.enableDangerous {
 		writeFile, toolErr := tools.NewWriteFileTool(config.workDir)
@@ -136,11 +164,12 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	handler := eventPrinter(stderr, config.showThinking, config.jsonOutput)
 	var compactor engine.ContextCompactor
 	if config.contextTokens > 0 {
-		compactor = contextmanager.Window{MaxApproxTokens: config.contextTokens, ReserveTokens: config.contextTokens / 5}
+		compactor = contextmanager.Window{MaxApproxTokens: config.contextTokens, ReserveTokens: config.contextTokens / 5, Archive: archive}
 	}
 	agent, err := engine.New(model, registry, engine.Config{
 		WorkDir:         config.workDir,
 		EnableThinking:  config.thinking,
+		PlanMode:        config.planMode,
 		MaxTurns:        config.maxTurns,
 		MaxTokens:       config.tokenBudget,
 		MaxRepeatedCall: config.maxRepeatedCall,
@@ -196,6 +225,7 @@ func parseFlags(arguments []string, stderr io.Writer) (cliConfig, string, error)
 	flags.StringVar(&config.model, "model", os.Getenv("AGENT_MODEL"), "model identifier (required)")
 	flags.StringVar(&config.workDir, "workdir", ".", "workspace boundary")
 	flags.BoolVar(&config.thinking, "thinking", false, "run a tool-free planning call before each action call")
+	flags.BoolVar(&config.planMode, "plan-mode", false, "externalize long-task objective and progress with the canonical plan store")
 	flags.BoolVar(&config.showThinking, "show-thinking", false, "print Thinking phase text to stderr")
 	flags.BoolVar(&config.jsonOutput, "json", false, "write the complete structured result as JSON")
 	flags.BoolVar(&config.showVersion, "version", false, "print version and exit")

@@ -1,8 +1,8 @@
-# Reading notes: the first six Agent Harness lessons
+# Reading notes: Agent Harness lessons 0-13
 
-These notes summarize the six substantive PDFs (the opening essay plus lessons
-1-5). They turn the material into implementation requirements instead of
-copying the course examples verbatim.
+These notes summarize the supplied course material through lesson 13. They
+turn the material into implementation requirements instead of copying the
+pedagogical examples verbatim.
 
 ## 0. Opening: framework collapse and the Harness model
 
@@ -124,3 +124,117 @@ the rest of a large file.
 - [x] CLI and environment configuration
 - [x] Unit, race, vet, and build checks
 - [x] Container packaging and continuous deployment to GHCR
+
+## 7. A tolerant but safe Edit tool
+
+Exact replacement is the safest path, but model-generated `old_text` often
+loses line-ending or indentation detail. The implemented fallback chain is:
+
+```text
+exact -> normalized newline -> outer blank lines -> line indentation
+```
+
+Every level still requires one unique match. A fuzzy `replace_all` is never
+allowed. Unlike the lesson's compact example, the implementation maps a match
+back to the original byte range, preserves CRLF/LF conventions, reindents a
+replacement against the target block, serializes mutations of the same path,
+supports an `expected_sha256` precondition, performs an atomic replace, and
+verifies the written digest by reading it back.
+
+## 8. Parallel tool calls
+
+Fork/join must preserve result order, but the lesson's initial “parallelize
+everything” independence assumption is too weak for production. 01agent
+parallelizes a batch only when every tool is classified as read-only and
+parallel-safe. Batches containing writes or execution remain serial, global
+parallelism is bounded, and a fatal result cancels the remaining serial batch.
+
+## 9. Feishu integration
+
+The useful abstraction is not `fmt.Println` versus a Feishu sender; it is an
+I/O boundary around the engine. The native bridge uses the official Channel
+and WebSocket SDK for normalization, mention policy, sending, and transport
+lifecycle. Its event callback does only a durable enqueue and returns quickly.
+Workers call the HTTP Session API outside the callback, use `event_id` as an
+idempotency key, map a chat to a stable session, and persist queued,
+processing, succeeded, or failed delivery state. Restart reconciliation moves
+unacknowledged processing jobs back to queued.
+
+This deliberately avoids the lesson example's unbounded goroutine-per-message
+pattern and shared-workspace race.
+
+## 10. Prompt composition, AGENTS.md, and Skills
+
+The system prompt is a versioned capability, not a constant string. At run
+admission the composer snapshots the base prompt, workspace `AGENTS.md`, and
+`.01agent/skills/*/SKILL.md`. Only skill name, description, and revision enter
+the prompt. The body remains outside the context until the model calls
+`read_skill`, which reads from that run's immutable snapshot rather than from
+the live filesystem.
+
+Tool, prompt, AGENTS, and Skill digests are combined into the capability
+revision stored in checkpoints and traces. Resume fails if any component has
+changed, making replay behavior explicit rather than silently mixing versions.
+
+## 11. Session isolation and working memory
+
+A Run is one query-loop execution; a Session is an ordered conversation made
+of multiple Runs. The file-backed Session store maps stable session IDs to
+messages and completed turns. Each submitted turn has an operation ID and a
+separate run ID. Same-session turns are serialized while different sessions
+can execute concurrently.
+
+The store persists a pending turn before execution and commits the updated
+conversation only after the Run result is durable. A duplicate operation ID
+replays the original result. After a crash, recovery first looks for a
+completed Run result, then a checkpoint, and only starts fresh when neither
+exists.
+
+## 12. Tiered context compaction
+
+Compaction affects provider input, never the authoritative raw archive. Before
+lossy transformation, messages are externalized with stable source IDs. The
+compactor then masks old tool observations, collapses old assistant prose,
+head/tail truncates unusually large recent observations, and finally drops a
+middle window while preserving recent complete tool-call/result groups.
+
+Markers instruct the model to use `recall_context`. The recall tool performs
+session-scoped BM25-style lexical ranking, returns source IDs and bounded
+excerpts, and never crosses session boundaries. Conflict precedence is stated
+in the compacted context: newer raw evidence wins over older raw evidence,
+which wins over derived summaries.
+
+## 13. Externalized plan and durable memory
+
+Long tasks need state that survives model calls and process restarts. 01agent
+uses three distinct stores instead of treating all “memory” as one blob:
+
+- canonical Run history and trace for protocol recovery and replay;
+- a session-scoped raw archive for detail recall;
+- a revision-CAS Plan store for model-maintained task progress.
+
+`update_plan` creates or updates a structured plan with an operation ID,
+semantic fingerprint, and expected revision. The canonical JSON is atomically
+committed and read back before acknowledgement. `PLAN.md` and `TODO.md` are
+human-readable projections that an idempotent retry can repair after a crash.
+Internal state tools use the separate `state` risk class: they may mutate only
+the harness state directory and do not gain workspace-write authority.
+
+Plan Mode is explicit (`--plan-mode`, `AGENT_PLAN_MODE`, or per-request
+`plan_mode`) and is intentionally independent from Thinking. Plan Mode provides
+macro navigation across turns and restarts; Thinking remains a micro-level
+reasoning pass. The production implementation stores per-session plans under
+the durable Harness state directory rather than polluting a shared target
+workspace. Markdown files are inspectable projections; canonical updates go
+through the revision-checked tool so manual or concurrent writes cannot silently
+win.
+
+## Implementation status for lessons 7-13
+
+- [x] Four-level, unique-only Edit fallback with stale-write detection
+- [x] Bounded, ordered, read-only parallel tool scheduling
+- [x] Durable Feishu queue and official WebSocket Channel bridge
+- [x] Per-run AGENTS/Skill snapshot and lazy `read_skill`
+- [x] Durable multi-Run Session manager and idempotent turn API
+- [x] Tiered compaction, raw archive, source IDs, and `recall_context`
+- [x] Revisioned Plan state plus PLAN.md/TODO.md projections
