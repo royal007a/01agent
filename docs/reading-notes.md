@@ -1,4 +1,4 @@
-# Reading notes: Agent Harness lessons 0-13
+# Reading notes: Agent Harness lessons 0-17
 
 These notes summarize the supplied course material through lesson 13. They
 turn the material into implementation requirements instead of copying the
@@ -238,3 +238,50 @@ win.
 - [x] Durable multi-Run Session manager and idempotent turn API
 - [x] Tiered compaction, raw archive, source IDs, and `recall_context`
 - [x] Revisioned Plan state plus PLAN.md/TODO.md projections
+
+## 14. Context-aware error recovery
+
+Tool errors are observations, but terse observations often cause a model to
+retry blindly. Recovery advice belongs at the harness boundary and is keyed by
+stable domain error codes such as `no_match`, `ambiguous_match`, and
+`edit_conflict`; matching human-readable OS error strings is deliberately
+avoided. The original structured fields remain authoritative, while the tool
+observation and trace receive concise corrective guidance. Unknown retryable
+errors get only generic advice so the engine does not invent domain policy.
+
+## 15. Soft reminders and hard loop limits
+
+Recent reminder messages can overcome recency bias, but they are probabilistic
+behavior shaping rather than a safety boundary. Equivalent calls use the
+canonical tool/arguments fingerprint already persisted in checkpoints. On the
+configured limit, 01agent appends and traces one user-role system reminder only
+after all tool-call/result pairs are complete. A subsequent equivalent request
+hits the existing deterministic terminal guard; max turns, tokens, and deadline
+remain independent hard limits.
+
+## 16. Approval middleware
+
+Dangerous capability admission needs three outcomes: allow, deny, or ask. An
+approval must bind to the exact run, Turn lease, capability revision, tool,
+arguments fingerprint, and expiration; approving only a tool name is too
+broad. Pending decisions must survive restart, allow explicit rejection, and
+be consumed once. Cancellation or a stale lease must still be checked directly
+before execution. Channel adapters may present buttons or commands, but policy
+and durable state remain channel-independent.
+
+## 17. Context-isolated Subagents
+
+A Subagent is a bounded child query loop with a fresh transcript, not another
+message in the parent's growing context. It receives only a frozen read-only
+tool snapshot, excludes the spawn tool to prevent recursion, inherits
+cancellation, has its own turn/token/deadline limits, and returns a bounded
+summary to the parent. Child run identity and parent lineage must be visible in
+traces. Shell access is not considered read-only even when the prompt asks it
+to behave, so Bash is never included in the child registry.
+
+## Implementation status for lessons 14-17
+
+- [x] Error-code-driven recovery guidance and trace events
+- [x] Soft repeat reminder before the deterministic hard stop
+- [ ] Durable exact-call approval requests and decision API
+- [ ] Bounded, read-only, recursion-free Subagent tool

@@ -326,6 +326,45 @@
         "max_turns": 3,
         "tool_output_contains": {"read_plan": "Ship the harness safely"}
       }
+    },
+    {
+      "id": "structured-edit-recovery",
+      "prompt": "Recover from a stale edit target without guessing.",
+      "enable_dangerous": true,
+      "approved_tools": ["edit_file"],
+      "files": {"note.txt": "current text\n"},
+      "script": [
+        {"tool_calls": [{"id": "recover-edit", "name": "edit_file", "arguments": {"path": "note.txt", "old_text": "missing text", "new_text": "updated text"}}]},
+        {"content": "I re-read before any further edit."}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "re-read",
+        "tool_sequence": ["edit_file"],
+        "min_turns": 2,
+        "max_turns": 2,
+        "min_recovery_hints": 1,
+        "tool_output_contains": {"edit_file": "Recovery guidance:"}
+      }
+    },
+    {
+      "id": "soft-repeat-reminder",
+      "prompt": "Notice repeated equivalent calls and change course.",
+      "files": {"loop.txt": "same observation\n"},
+      "max_repeated_call": 2,
+      "script": [
+        {"tool_calls": [{"id": "loop-read-1", "name": "read_file", "arguments": {"path": "loop.txt"}}]},
+        {"tool_calls": [{"id": "loop-read-2", "name": "read_file", "arguments": {"path": "loop.txt"}}]},
+        {"content": "I changed course after the reminder."}
+      ],
+      "expected": {
+        "reason": "completed",
+        "answer_contains": "changed course",
+        "tool_sequence": ["read_file", "read_file"],
+        "min_turns": 3,
+        "max_turns": 3,
+        "min_reminders": 1
+      }
     }
   ]
 }

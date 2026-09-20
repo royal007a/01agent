@@ -40,6 +40,9 @@ usage budget, repeated-call fingerprints, checkpoints, input claims, and
 terminal reason. At admission it freezes one immutable capability snapshot;
 the provider definitions and physical dispatch use that same revision. Every
 state transition emits a sequenced event with a run ID and timestamp.
+Recoverable tool failures receive guidance selected from their stable domain
+error code. An equivalent call at the configured repeat limit emits a recent
+soft reminder; one more equivalent request is rejected by the hard loop guard.
 
 `SessionStore` is the ConversationManager above the query loop. It serializes
 one session without blocking unrelated sessions, records a pending operation
@@ -123,7 +126,8 @@ parse log messages.
 single/paginated/parallel reads, recovery paths, loop and budget exits,
 thinking/action separation, compaction, write/edit, Bash, approval denial,
 canonical commits, queued user/task inputs, fuzzy edits, session continuity,
-lazy Skills, archived recall, and persistent Plan state.
+lazy Skills, archived recall, persistent Plan state, recovery hints, and
+soft-before-hard repeat intervention.
 Each case writes and replays its real runtime trace before it is scored. The
 gate currently requires all cases to pass.
 

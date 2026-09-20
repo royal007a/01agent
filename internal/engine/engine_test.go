@@ -271,6 +271,44 @@ func TestRunStopsRepeatedEquivalentCall(t *testing.T) {
 	if result.Reason != schema.TerminalFatalToolError || registry.calls != 2 {
 		t.Fatalf("result = %#v, registry calls = %d", result, registry.calls)
 	}
+	foundReminder := false
+	for _, message := range model.histories[len(model.histories)-1] {
+		foundReminder = foundReminder || strings.Contains(message.Content, reminderPrefix)
+	}
+	if !foundReminder {
+		t.Fatalf("provider histories did not contain a repeated-call reminder: %#v", model.histories)
+	}
+}
+
+func TestRunAddsStructuredRecoveryGuidanceAndTraceEvent(t *testing.T) {
+	model := &scriptedProvider{generations: []schema.Generation{
+		{Message: schema.Message{ToolCalls: []schema.ToolCall{{ID: "edit-1", Name: "edit_file", Arguments: json.RawMessage(`{"path":"x"}`)}}}},
+		{Message: schema.Message{Content: "recovered"}},
+	}}
+	registry := newFakeRegistry()
+	registry.definitions = []schema.ToolDefinition{{Name: "edit_file"}}
+	registry.result = func(call schema.ToolCall) schema.ToolResult {
+		return schema.ToolResult{ToolCallID: call.ID, Output: "Error [no_match]: old text absent", IsError: true, ErrorCode: "no_match", Retryable: true}
+	}
+	store := &memoryStore{}
+	agent, err := New(model, registry, Config{WorkDir: t.TempDir(), Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.Run(context.Background(), "edit")
+	if err != nil || result.Reason != schema.TerminalCompleted {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(result.Messages[3].Content, "Recovery guidance:") || !strings.Contains(result.Messages[3].Content, "Read the current file again") {
+		t.Fatalf("tool observation=%#v", result.Messages[3])
+	}
+	found := false
+	for _, event := range store.events {
+		found = found || event.Type == EventRecoveryHint
+	}
+	if !found {
+		t.Fatalf("events=%#v", store.events)
+	}
 }
 
 func TestRunMapsDeadlineToTimeout(t *testing.T) {

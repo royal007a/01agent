@@ -68,6 +68,8 @@ type Expected struct {
 	MinCompactions     int                   `json:"min_compactions,omitempty"`
 	MinHistoryCommits  int                   `json:"min_history_commits,omitempty"`
 	MinInputClaims     int                   `json:"min_input_claims,omitempty"`
+	MinRecoveryHints   int                   `json:"min_recovery_hints,omitempty"`
+	MinReminders       int                   `json:"min_reminders,omitempty"`
 	Files              map[string]string     `json:"files,omitempty"`
 	ContextContains    []string              `json:"context_contains,omitempty"`
 	ToolOutputContains map[string]string     `json:"tool_output_contains,omitempty"`
@@ -288,6 +290,8 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	compactions := 0
 	historyCommits := 0
 	inputClaims := 0
+	recoveryHints := 0
+	reminders := 0
 	for _, event := range trace.Events {
 		if event.Type == engine.EventToolStarted {
 			actualTools = append(actualTools, event.ToolCall.Name)
@@ -306,6 +310,12 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 		}
 		if event.Type == engine.EventInputAcked {
 			inputClaims++
+		}
+		if event.Type == engine.EventRecoveryHint {
+			recoveryHints++
+		}
+		if event.Type == engine.EventReminder {
+			reminders++
 		}
 	}
 	failures := make([]string, 0)
@@ -333,6 +343,12 @@ func runCase(ctx context.Context, store *runstore.FileStore, artifactsDir string
 	}
 	if inputClaims < item.Expected.MinInputClaims {
 		failures = append(failures, fmt.Sprintf("input_claims=%d below %d", inputClaims, item.Expected.MinInputClaims))
+	}
+	if recoveryHints < item.Expected.MinRecoveryHints {
+		failures = append(failures, fmt.Sprintf("recovery_hints=%d below %d", recoveryHints, item.Expected.MinRecoveryHints))
+	}
+	if reminders < item.Expected.MinReminders {
+		failures = append(failures, fmt.Sprintf("reminders=%d below %d", reminders, item.Expected.MinReminders))
 	}
 	for name, expectedContent := range item.Expected.Files {
 		path := filepath.Join(workDir, filepath.Clean(name))

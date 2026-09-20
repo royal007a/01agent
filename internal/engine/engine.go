@@ -60,6 +60,8 @@ const (
 	EventAssistant    EventType = "assistant"
 	EventToolStarted  EventType = "tool_started"
 	EventToolResult   EventType = "tool_result"
+	EventRecoveryHint EventType = "recovery_hint"
+	EventReminder     EventType = "system_reminder"
 	EventCompacted    EventType = "context_compacted"
 	EventCheckpoint   EventType = "checkpoint"
 	EventCommitted    EventType = "history_committed"
@@ -588,7 +590,8 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 		}
 
 		toolResults := runtime.ExecuteBatch(ctx, generation.Message.ToolCalls)
-		for _, toolResult := range toolResults {
+		for index, rawResult := range toolResults {
+			toolResult, hint := attachRecoveryHint(rawResult)
 			messages = append(messages, schema.Message{
 				Role:       schema.RoleTool,
 				Content:    toolResult.Output,
@@ -597,6 +600,13 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 			})
 			if err := emit(Event{Type: EventToolResult, Turn: turn, ToolResult: toolResult}); err != nil {
 				return finish(schema.TerminalPersistenceError, err)
+			}
+			if hint != "" {
+				if err := emit(Event{Type: EventRecoveryHint, Turn: turn, ToolResult: toolResult, Metadata: map[string]any{
+					"error_code": toolResult.ErrorCode, "hint": hint,
+				}}); err != nil {
+					return finish(schema.TerminalPersistenceError, err)
+				}
 			}
 			if toolResult.Fatal {
 				result.Reason = schema.TerminalFatalToolError
@@ -614,6 +624,17 @@ func (e *AgentEngine) run(parent context.Context, userPrompt string, messages []
 					result.Reason = reason
 				}
 				return finish(result.Reason, nil)
+			}
+			call := generation.Message.ToolCalls[index]
+			count := repeatedCalls[toolFingerprint(call)]
+			if count == e.config.MaxRepeatedCall {
+				reminder := repeatedCallReminder(call.Name, count, e.config.MaxRepeatedCall)
+				messages = append(messages, reminder)
+				if err := emit(Event{Type: EventReminder, Turn: turn, Message: reminder, Metadata: map[string]any{
+					"kind": "repeated_call", "tool": call.Name, "count": count, "hard_limit": e.config.MaxRepeatedCall,
+				}}); err != nil {
+					return finish(schema.TerminalPersistenceError, err)
+				}
 			}
 		}
 		if err := commit(fmt.Sprintf("step-%d-tool-results", turn), turn); err != nil {
