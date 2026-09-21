@@ -205,7 +205,14 @@ func TestApprovalDecisionHTTPAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Approvals: approvals})
+	inbox, err := runstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{
+		Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Approvals: approvals,
+		InputQueue: inbox, InputEnqueuer: inbox, Store: inbox,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +229,10 @@ func TestApprovalDecisionHTTPAPI(t *testing.T) {
 	handler.ServeHTTP(listed, listRequest)
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), pending.ID) {
 		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	claim, err := inbox.Claim(context.Background(), "run-http", "turn-resume", 10)
+	if err != nil || len(claim.Items) != 1 || claim.Items[0].Kind != engine.InputTool || !strings.Contains(claim.Items[0].Content, "Retry that exact tool call") {
+		t.Fatalf("approval input=%#v err=%v", claim, err)
 	}
 }
 

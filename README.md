@@ -176,6 +176,8 @@ response includes an `approval_id`. Inspect it with `GET /v1/approvals/{id}`,
 decide it with `POST /v1/approvals/{id}/decision` using
 `{"decision":"approved","actor":"operator"}`, then resume the run. Decisions
 are exact-call, expiring, durable, and single-use.
+The decision is also queued as durable tool input, so a resumed run observes it
+through the normal claim/commit/ack barrier before deciding whether to retry.
 
 For a durable multi-turn conversation, use the Session endpoint. The
 `operation_id` should be the upstream message/event ID; retrying the same ID

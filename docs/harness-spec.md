@@ -26,6 +26,8 @@ the runtime and deterministic evaluator.
   invoking the physical tool.
 - HTTP and Feishu are presentation adapters; the approval store and policy
   MUST remain channel-independent and replayable.
+- An approval decision MUST be durably delivered to the paused run through the
+  input claim/commit/ack protocol before a resumed model call observes it.
 
 ## Subagents
 

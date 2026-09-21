@@ -71,6 +71,10 @@ binds the run, origin Turn lease, capability digest, tool, canonical arguments
 digest, and expiry. The authenticated decision API can approve or reject it;
 an approval is consumed exactly once when the same run requests the same call
 again, and the active admission's Turn lease is then checked before execution.
+The decision endpoint also enqueues a durable `tool_input` for the run; resume
+claims and commits that input before the model decides whether to repeat the
+approved exact call. Rejections use the same path and instruct the model not to
+retry the action.
 
 `RunStore` is the canonical history writer. Every mutation carries a monotonic
 operation ID, semantic SHA-256 fingerprint, and expected revision. The writer

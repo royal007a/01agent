@@ -605,6 +605,20 @@ func (h *Handler) decideApproval(writer http.ResponseWriter, request *http.Reque
 		writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
 		return
 	}
+	if h.config.InputEnqueuer != nil {
+		directive := fmt.Sprintf("Approval %s was %s for the exact %s call.", item.ID, item.State, item.ToolName)
+		if item.State == approvalstore.Approved {
+			directive += " Retry that exact tool call if it is still required; changed arguments require a new approval."
+		} else {
+			directive += " Do not retry the denied action; choose a safe alternative or report the block."
+		}
+		if _, err := h.config.InputEnqueuer.Enqueue(context.WithoutCancel(request.Context()), engine.QueuedInput{
+			ID: "approval-decision-" + item.ID, RunID: item.RunID, Kind: engine.InputTool, Content: directive,
+		}); err != nil {
+			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "persist approval decision input: " + err.Error()})
+			return
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"approval": item})
 }
 
