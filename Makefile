@@ -9,6 +9,7 @@ build:
 	go build -trimpath -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -trimpath -o bin/01agent-eval ./cmd/01agent-eval
 	go build -trimpath -o bin/01agent-control-eval ./cmd/01agent-control-eval
+	go build -trimpath -o bin/01agent-dispatch-eval ./cmd/01agent-dispatch-eval
 	go build -trimpath -o bin/01agent-daemon ./cmd/01agent-daemon
 	go build -trimpath -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -trimpath -o bin/01agent-sandbox ./cmd/01agent-sandbox
@@ -20,6 +21,7 @@ eval:
 	mkdir -p artifacts/eval
 	go run ./cmd/01agent-eval --suite evals/runtime.json --artifacts artifacts/eval --report artifacts/eval/report.json
 	go run ./cmd/01agent-control-eval --suite evals/control-plane.json --report artifacts/eval/control-plane-report.json
+	go run ./cmd/01agent-dispatch-eval --suite evals/dispatcher.json --report artifacts/eval/dispatcher-report.json
 
 verify:
 	test -z "$$(gofmt -l cmd internal)"
@@ -31,10 +33,11 @@ verify:
 	go build -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -o bin/01agent-eval ./cmd/01agent-eval
 	go build -o bin/01agent-control-eval ./cmd/01agent-control-eval
+	go build -o bin/01agent-dispatch-eval ./cmd/01agent-dispatch-eval
 	go build -o bin/01agent-daemon ./cmd/01agent-daemon
 	go build -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -o bin/01agent-sandbox ./cmd/01agent-sandbox
 	$(MAKE) eval
 
 clean:
-	rm -f bin/01agent bin/01agentd bin/01agent-feishu bin/01agent-eval bin/01agent-control-eval bin/01agent-daemon bin/01agent-replay bin/01agent-sandbox coverage.out
+	rm -f bin/01agent bin/01agentd bin/01agent-feishu bin/01agent-eval bin/01agent-control-eval bin/01agent-dispatch-eval bin/01agent-daemon bin/01agent-replay bin/01agent-sandbox coverage.out

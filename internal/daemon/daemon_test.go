@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,85 @@ import (
 	agentserver "github.com/royal007a/01agent/internal/server"
 	"github.com/royal007a/01agent/internal/tools"
 )
+
+type executorFunc func(context.Context, string, computer.RunRequest) (computer.RunResult, error)
+
+func (fn executorFunc) Execute(ctx context.Context, root string, request computer.RunRequest) (computer.RunResult, error) {
+	return fn(ctx, root, request)
+}
+
+func TestOutboundDaemonExecutesRunAndReturnsStructuredResult(t *testing.T) {
+	computers, err := computer.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := computers.Register(context.Background(), computer.RegisterInput{OperationID: "register-runner", ID: "runner", OwnerID: "owner", Name: "runner"}); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := agentserver.New(agentserver.Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Computers: computers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	requests := make(chan computer.RunRequest, 1)
+	executor := executorFunc(func(_ context.Context, _ string, request computer.RunRequest) (computer.RunResult, error) {
+		requests <- request
+		now := time.Now().UTC()
+		digest := sha256.Sum256([]byte(request.RunID))
+		return computer.RunResult{RunID: request.RunID, TaskID: request.TaskID, Success: true, Terminal: "completed", Summary: "done", Evidence: []string{"scripted"}, ArtifactURI: "memory://" + request.RunID, ArtifactHash: hex.EncodeToString(digest[:]), StartedAt: now, CompletedAt: now}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{ServerURL: server.URL, Token: "secret", ComputerID: "runner", RootDir: t.TempDir(), PollInterval: 10 * time.Millisecond, Tools: map[string]string{"runtime": "test"}, Sandboxes: []string{"test"}, Executor: executor})
+	}()
+	waitFor(t, func() bool {
+		state, stateErr := computers.GetState(context.Background())
+		return stateErr == nil && state.Computers["runner"].Status == computer.Online
+	})
+	state, err := computers.GetState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := computers.Rebind(context.Background(), computer.RebindInput{OperationID: "bind-agent", AgentID: "agent", TargetComputerID: "runner", ActorID: "owner", ExpectedBindingRevision: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := computers.AcquireRun(context.Background(), computer.RunLeaseInput{OperationID: "acquire-run", RunID: "run-1", AgentID: "agent", ComputerID: "runner", LeaseID: "run-lease", TTLSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	request := computer.RunRequest{RunID: "run-1", TaskID: "task-1", AgentID: "agent", Mode: computer.RunExecute, Prompt: "do it", AgentRevisionID: "agent-r1", RelationshipRevisionID: "relationship-r1", ExpectedCapabilityDigest: state.Computers["runner"].CurrentCapability, TimeoutSeconds: 30, MaxTurns: 4, TaskRevision: 1, TaskContractRevision: 1}
+	command, err := computers.QueueRun(context.Background(), "queue-run", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		current, stateErr := computers.GetState(context.Background())
+		return stateErr == nil && current.Commands[command.ID].State == computer.CommandAcked
+	})
+	select {
+	case received := <-requests:
+		if received.RunID != request.RunID || received.ExpectedCapabilityDigest != request.ExpectedCapabilityDigest {
+			t.Fatalf("received mismatched request: %+v", received)
+		}
+	default:
+		t.Fatal("executor did not receive run")
+	}
+	current, err := computers.GetState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := current.Commands[command.ID].Result
+	if result == nil || !result.Success || result.TaskID != "task-1" || result.ArtifactHash == "" {
+		t.Fatalf("structured result=%+v", result)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+}
 
 func TestOutboundDaemonExecutesTrackedOldComputerCleanup(t *testing.T) {
 	computers, err := computer.New(t.TempDir())

@@ -123,6 +123,15 @@ Daemon. Old-device cleanup is limited to
 and data outside that root are not migrated or deleted. Configure the reverse
 proxy to preserve WebSocket upgrades for this endpoint.
 
+`run_agent` commands execute the bundled `/usr/local/bin/01agent` by default
+inside `<daemon-root>/agents/<agent-id>/workspace`. Override the binary with
+`AGENT_RUNTIME_BINARY`, bound concurrency with
+`AGENT_DAEMON_MAX_CONCURRENT`, and allow requested dangerous tool names only
+through `AGENT_DAEMON_APPROVED_TOOLS`. A reconnect redelivers an unacknowledged
+Run ID, and the Daemon reuses its durable result or checkpoint. The server
+reconciles Dispatcher state every `AGENT_DISPATCH_RECONCILE_INTERVAL` (one
+second by default).
+
 ## Feishu bridge
 
 Run the HTTP service and bridge against the same durable deployment. The bridge

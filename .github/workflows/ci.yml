@@ -32,7 +32,12 @@ jobs:
       - name: Build evaluator and replay tool
         run: |
           go build -o /tmp/01agent-eval ./cmd/01agent-eval
+          go build -o /tmp/01agent-control-eval ./cmd/01agent-control-eval
+          go build -o /tmp/01agent-dispatch-eval ./cmd/01agent-dispatch-eval
           go build -o /tmp/01agent-replay ./cmd/01agent-replay
           GOOS=linux go build -o /tmp/01agent-sandbox ./cmd/01agent-sandbox
       - name: Run deterministic evaluation gate
-        run: go run ./cmd/01agent-eval --suite evals/runtime.json --artifacts /tmp/01agent-eval-artifacts --report /tmp/01agent-eval-artifacts/report.json
+        run: |
+          go run ./cmd/01agent-eval --suite evals/runtime.json --artifacts /tmp/01agent-eval-artifacts --report /tmp/01agent-eval-artifacts/report.json
+          go run ./cmd/01agent-control-eval --suite evals/control-plane.json --report /tmp/01agent-eval-artifacts/control-plane-report.json
+          go run ./cmd/01agent-dispatch-eval --suite evals/dispatcher.json --report /tmp/01agent-eval-artifacts/dispatcher-report.json

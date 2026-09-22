@@ -3,6 +3,7 @@ package computer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +34,9 @@ func TestCapabilitySnapshotsRebindLeaseAndCleanupLifecycle(t *testing.T) {
 	}
 	if _, _, err := store.Rebind(context.Background(), RebindInput{OperationID: "op-blocked", AgentID: "agent", TargetComputerID: "new", ActorID: "owner", ExpectedBindingRevision: 1}); !errors.Is(err, ErrActiveRun) {
 		t.Fatalf("active run did not block rebind: %v", err)
+	}
+	if _, err := store.AcquireRun(context.Background(), RunLeaseInput{OperationID: "op-run-2", RunID: "run-2", AgentID: "agent", ComputerID: "old", LeaseID: "run-lease-2", TTLSeconds: 60}); !errors.Is(err, ErrActiveRun) {
+		t.Fatalf("active run did not block concurrent Agent execution: %v", err)
 	}
 	if err := store.ReleaseRun(context.Background(), run.RunID, "op-release", run.LeaseID); err != nil {
 		t.Fatal(err)
@@ -70,6 +74,38 @@ func TestOfflineTargetAndConnectionLeaseAreFailClosed(t *testing.T) {
 	connect(t, store, "computer", "lease-a", "go1")
 	if _, err := store.Connect(context.Background(), Hello{ComputerID: "computer", LeaseID: "lease-b", OS: "linux", Arch: "amd64", Runtime: "go1"}, time.Minute); !errors.Is(err, ErrLease) {
 		t.Fatalf("competing connection err=%v", err)
+	}
+}
+
+func TestRunCommandFailsClosedWhenCapabilityChangesBeforePoll(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, store, "computer")
+	node := connect(t, store, "computer", "lease", "go1")
+	if _, _, err := store.Rebind(context.Background(), RebindInput{OperationID: "bind", AgentID: "agent", TargetComputerID: "computer", ActorID: "owner", ExpectedBindingRevision: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireRun(context.Background(), RunLeaseInput{OperationID: "acquire", RunID: "run", AgentID: "agent", ComputerID: "computer", LeaseID: "run-lease", TTLSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	command, err := store.QueueRun(context.Background(), "queue", RunRequest{RunID: "run", TaskID: "task", AgentID: "agent", Mode: RunExecute, Prompt: "execute", AgentRevisionID: "agent-v1", RelationshipRevisionID: "relationship-v1", ExpectedCapabilityDigest: node.CurrentCapability, TimeoutSeconds: 30, MaxTurns: 4, TaskRevision: 1, TaskContractRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Connect(context.Background(), Hello{ComputerID: "computer", LeaseID: "lease", OS: "linux", Arch: "amd64", Runtime: "go2", Sandboxes: []string{"landlock"}}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PollCommand(context.Background(), "computer", "lease"); !errors.Is(err, ErrNoCommand) {
+		t.Fatalf("stale command poll=%v", err)
+	}
+	state, err := store.GetState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Commands[command.ID].State != CommandFailed || !strings.Contains(state.Commands[command.ID].Error, "capability changed") {
+		t.Fatalf("command=%+v", state.Commands[command.ID])
 	}
 }
 

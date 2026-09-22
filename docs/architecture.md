@@ -130,6 +130,16 @@ an Agent queues cleanup on the old Computer; the Daemon renames the exact
 managed Agent directory into its private trash before removal, acknowledges
 success/failure, and never touches credentials or paths outside its root.
 
+`dispatcher.Store` is the durable coordinator between Product Task v2 and the
+outbound Daemon protocol. It claims the Task, freezes Agent, Relationship,
+Session, Task-contract, and Computer capability revisions, acquires a Run
+lease, and queues a typed `run_agent` command. Successful execution becomes an
+immutable Artifact plus Handoff; review runs on the distinct Gate reviewer's
+bound Computer. Parent Tasks wait without rerunning while children remain open.
+Reject loops back to a new Run, needs-human waits for an explicit Task review,
+and cancel closes the Task while discarding late results. The canonical phase
+ledger lets a restarted Dispatcher or reconnected Daemon reconcile safely.
+
 Evolution stays inside the revision model. `agentregistry.Store` can retain a
 candidate without activating it, then append a selection record comparing the
 current baseline under identical suite/model/budget conditions. Relationship
@@ -206,6 +216,12 @@ contract validation, operation idempotency, revision CAS, exclusive/expired
 leases, renewal, contract revision, Artifact immutability, Handoff binding,
 parent/child barriers, reviewer authorization, rejection/rework, and
 `needs_human` resolution. It also requires a 100% pass rate.
+
+`evals/dispatcher.json` adds 15 end-to-end coordination and failure scenarios:
+two Agents on different Computers complete a parent/child graph with independent
+review, plus offline recovery, retries and exhaustion, review rework/human
+takeover, cancellation, late-result suppression, lease redelivery, and restart
+recovery. Its gate is also 100%.
 
 The evaluator is a runtime conformance suite, not a claim about model quality.
 Its scripted provider makes regressions reproducible and cost-free. A live-model

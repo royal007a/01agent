@@ -23,13 +23,21 @@ import (
 var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Config struct {
-	ServerURL    string
-	Token        string
-	ComputerID   string
-	RootDir      string
-	PollInterval time.Duration
-	Tools        map[string]string
-	Sandboxes    []string
+	ServerURL     string
+	Token         string
+	ComputerID    string
+	RootDir       string
+	PollInterval  time.Duration
+	Tools         map[string]string
+	Sandboxes     []string
+	Executor      Executor
+	MaxConcurrent int
+}
+
+type executionOutcome struct {
+	command computer.Command
+	result  *computer.RunResult
+	err     error
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -46,6 +54,12 @@ func Run(ctx context.Context, config Config) error {
 	}
 	if config.PollInterval <= 0 {
 		config.PollInterval = time.Second
+	}
+	if config.Executor == nil {
+		config.Executor = ProcessExecutor{Binary: os.Getenv("AGENT_RUNTIME_BINARY"), AllowedTools: allowedToolMap(os.Getenv("AGENT_DAEMON_APPROVED_TOOLS"))}
+	}
+	if config.MaxConcurrent <= 0 {
+		config.MaxConcurrent = 2
 	}
 	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o700); err != nil {
 		return err
@@ -77,41 +91,97 @@ func Run(ctx context.Context, config Config) error {
 	}
 	ticker := time.NewTicker(config.PollInterval)
 	defer ticker.Stop()
+	outcomes := make(chan executionOutcome, config.MaxConcurrent+8)
+	semaphore := make(chan struct{}, config.MaxConcurrent)
+	active := map[string]context.CancelFunc{}
+	defer func() {
+		for _, cancel := range active {
+			cancel()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-		}
-		if err := wsjson.Write(ctx, connection, computer.ClientMessage{Type: "poll"}); err != nil {
-			return err
-		}
-		response = computer.ServerMessage{}
-		if err := wsjson.Read(ctx, connection, &response); err != nil {
-			return err
-		}
-		if response.Type == "noop" {
-			continue
-		}
-		if response.Type != "command" || response.Command == nil {
-			return errors.New("daemon received invalid server message")
-		}
-		executionErr := execute(root, *response.Command)
-		ack := computer.CommandAck{CommandID: response.Command.ID, Success: executionErr == nil}
-		if executionErr != nil {
-			ack.Error = executionErr.Error()
-		}
-		if err := wsjson.Write(ctx, connection, computer.ClientMessage{Type: "ack", Ack: &ack}); err != nil {
-			return err
-		}
-		response = computer.ServerMessage{}
-		if err := wsjson.Read(ctx, connection, &response); err != nil {
-			return err
-		}
-		if response.Type != "acknowledged" {
-			return errors.New("command acknowledgement was not confirmed")
+			if err := poll(ctx, connection, hello, root, config, semaphore, active, outcomes); err != nil {
+				return err
+			}
+		case outcome := <-outcomes:
+			if outcome.command.Run != nil {
+				delete(active, outcome.command.Run.RunID)
+			}
+			ack := computer.CommandAck{CommandID: outcome.command.ID, Success: outcome.err == nil, Result: outcome.result}
+			if outcome.err != nil {
+				ack.Error = outcome.err.Error()
+			}
+			if err := acknowledge(ctx, connection, ack); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func poll(ctx context.Context, connection *websocket.Conn, hello computer.Hello, root string, config Config, semaphore chan struct{}, active map[string]context.CancelFunc, outcomes chan<- executionOutcome) error {
+	if err := wsjson.Write(ctx, connection, computer.ClientMessage{Type: "poll"}); err != nil {
+		return err
+	}
+	var response computer.ServerMessage
+	if err := wsjson.Read(ctx, connection, &response); err != nil {
+		return err
+	}
+	if response.Type == "noop" {
+		return nil
+	}
+	if response.Type != "command" || response.Command == nil {
+		return errors.New("daemon received invalid server message")
+	}
+	command := *response.Command
+	if command.Kind == "cancel_run" {
+		if cancel := active[command.CancelRunID]; cancel != nil {
+			cancel()
+		}
+		return acknowledge(ctx, connection, computer.CommandAck{CommandID: command.ID, Success: true})
+	}
+	var executionContext context.Context
+	var cancel context.CancelFunc
+	if command.Run != nil {
+		executionContext, cancel = context.WithTimeout(ctx, time.Duration(command.Run.TimeoutSeconds)*time.Second)
+		active[command.Run.RunID] = cancel
+	} else {
+		executionContext, cancel = context.WithCancel(ctx)
+	}
+	go func() {
+		defer cancel()
+		select {
+		case semaphore <- struct{}{}:
+			defer func() { <-semaphore }()
+		case <-executionContext.Done():
+			outcomes <- executionOutcome{command: command, err: executionContext.Err()}
+			return
+		}
+		if command.Kind == "run_agent" && command.Run != nil {
+			result, err := config.Executor.Execute(executionContext, root, *command.Run)
+			outcomes <- executionOutcome{command: command, result: &result, err: err}
+			return
+		}
+		outcomes <- executionOutcome{command: command, err: execute(root, command)}
+	}()
+	return nil
+}
+
+func acknowledge(ctx context.Context, connection *websocket.Conn, ack computer.CommandAck) error {
+	if err := wsjson.Write(ctx, connection, computer.ClientMessage{Type: "ack", Ack: &ack}); err != nil {
+		return err
+	}
+	var response computer.ServerMessage
+	if err := wsjson.Read(ctx, connection, &response); err != nil {
+		return err
+	}
+	if response.Type != "acknowledged" {
+		return errors.New("command acknowledgement was not confirmed")
+	}
+	return nil
 }
 
 func execute(root string, command computer.Command) error {
@@ -160,4 +230,14 @@ func newLeaseID() string {
 		return "daemon-" + hex.EncodeToString(value[:])
 	}
 	return fmt.Sprintf("daemon-%d", time.Now().UnixNano())
+}
+
+func allowedToolMap(value string) map[string]bool {
+	result := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result[item] = true
+		}
+	}
+	return result
 }

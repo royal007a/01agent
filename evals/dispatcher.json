@@ -1,0 +1,21 @@
+{
+  "name": "01agent-dispatcher-daemon-e2e-v1",
+  "minimum_pass_rate": 1.0,
+  "cases": [
+    "01_parent_child_two_computers_independent_review",
+    "02_start_operation_is_idempotent",
+    "03_same_agent_cannot_self_review",
+    "04_offline_computer_waits_then_recovers",
+    "05_runtime_failure_retries_and_succeeds",
+    "06_daemon_ack_failure_retries",
+    "07_execution_attempts_exhaust_and_close_task",
+    "08_review_runtime_failure_retries",
+    "09_reject_triggers_rework_then_pass",
+    "10_needs_human_stops_automatic_progress",
+    "11_manual_gate_pass_completes_awaiting_human",
+    "12_cancel_running_run_closes_task",
+    "13_late_result_after_cancel_is_ignored",
+    "14_sent_command_redelivers_only_to_new_daemon_lease",
+    "15_restart_replays_canonical_dispatch_state"
+  ]
+}

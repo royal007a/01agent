@@ -21,6 +21,7 @@ import (
 	"github.com/royal007a/01agent/internal/automation"
 	"github.com/royal007a/01agent/internal/computer"
 	"github.com/royal007a/01agent/internal/contextmanager"
+	"github.com/royal007a/01agent/internal/dispatcher"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/memory"
 	"github.com/royal007a/01agent/internal/plan"
@@ -164,6 +165,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize computer store: %w", err)
 	}
+	dispatches, err := dispatcher.New(filepath.Join(store.Dir(), "dispatcher"), workItems, agents, computers)
+	if err != nil {
+		return fmt.Errorf("initialize dispatcher: %w", err)
+	}
 	teams, err := team.New(filepath.Join(store.Dir(), "teams"), agents)
 	if err != nil {
 		return fmt.Errorf("initialize team store: %w", err)
@@ -198,6 +203,7 @@ func run() error {
 		Attention:        attentionStore,
 		Agents:           agents,
 		Computers:        computers,
+		Dispatcher:       dispatches,
 		Teams:            teams,
 		Automations:      automations,
 		Sessions:         sessions,
@@ -219,6 +225,20 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		ticker := time.NewTicker(envDuration("AGENT_DISPATCH_RECONCILE_INTERVAL", time.Second))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := dispatches.Reconcile(context.WithoutCancel(ctx)); err != nil {
+					log.Printf("dispatcher reconciliation failed: %v", err)
+				}
+			}
+		}
+	}()
 	go func() {
 		ticker := time.NewTicker(envDuration("AGENT_TASK_RECONCILE_INTERVAL", 30*time.Second))
 		defer ticker.Stop()

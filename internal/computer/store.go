@@ -256,15 +256,28 @@ func (s *Store) AcquireRun(ctx context.Context, input RunLeaseInput) (RunLease, 
 		if operation.Fingerprint != fingerprint {
 			return RunLease{}, ErrConflict
 		}
-		return state.RunLeases[input.RunID], nil
+		lease, exists := state.RunLeases[input.RunID]
+		if !exists {
+			return RunLease{}, ErrLease
+		}
+		return lease, nil
 	}
 	binding, found := state.Bindings[input.AgentID]
 	if !found || binding.ComputerID != input.ComputerID {
 		return RunLease{}, ErrConflict
 	}
 	now := s.now()
-	if current, found := state.RunLeases[input.RunID]; found && now.Before(current.ExpiresAt) {
-		return RunLease{}, ErrLease
+	for runID, current := range state.RunLeases {
+		if !now.Before(current.ExpiresAt) {
+			delete(state.RunLeases, runID)
+			continue
+		}
+		if current.RunID == input.RunID {
+			return RunLease{}, ErrLease
+		}
+		if current.AgentID == input.AgentID {
+			return RunLease{}, ErrActiveRun
+		}
 	}
 	lease := RunLease{RunID: input.RunID, AgentID: input.AgentID, ComputerID: input.ComputerID, LeaseID: input.LeaseID, ExpiresAt: now.Add(time.Duration(input.TTLSeconds) * time.Second)}
 	state.RunLeases[lease.RunID] = lease
@@ -303,6 +316,96 @@ func (s *Store) ReleaseRun(ctx context.Context, runID, operationID, leaseID stri
 	return s.writeUnlocked(state)
 }
 
+func (s *Store) QueueRun(ctx context.Context, operationID string, request RunRequest) (Command, error) {
+	if err := ctx.Err(); err != nil {
+		return Command{}, err
+	}
+	operationID = strings.TrimSpace(operationID)
+	request = normalizeRunRequest(request)
+	if !safeID.MatchString(operationID) || validateRunRequest(request) != nil {
+		return Command{}, errors.New("valid operation and run request are required")
+	}
+	fingerprint, _ := semanticFingerprint("queue_run", request)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.readUnlocked()
+	if err != nil {
+		return Command{}, err
+	}
+	if operation, found := findOperation(state, operationID); found {
+		if operation.Fingerprint != fingerprint {
+			return Command{}, ErrConflict
+		}
+		command, found := state.Commands[operation.EntityID]
+		if !found {
+			return Command{}, ErrConflict
+		}
+		return command, nil
+	}
+	lease, found := state.RunLeases[request.RunID]
+	now := s.now()
+	if !found || lease.AgentID != request.AgentID || !now.Before(lease.ExpiresAt) {
+		return Command{}, ErrLease
+	}
+	binding, bound := state.Bindings[request.AgentID]
+	computer, exists := state.Computers[lease.ComputerID]
+	if !bound || binding.ComputerID != lease.ComputerID || !exists || computer.Status != Online || !now.Before(computer.LeaseExpiresAt) {
+		return Command{}, ErrOffline
+	}
+	if computer.CurrentCapability != request.ExpectedCapabilityDigest {
+		return Command{}, ErrConflict
+	}
+	request.DispatchedAt = now
+	command := Command{
+		ID: internalOperationID("run", operationID), ComputerID: computer.ID, Kind: "run_agent", AgentID: request.AgentID,
+		Run: &request, State: CommandQueued, CreatedAt: now, UpdatedAt: now,
+	}
+	state.Commands[command.ID] = command
+	appendOperation(&state, operationID, "queue_run", fingerprint, command.ID, now)
+	if err := s.writeUnlocked(state); err != nil {
+		return Command{}, err
+	}
+	return command, nil
+}
+
+func (s *Store) QueueCancel(ctx context.Context, operationID, runID string) (Command, error) {
+	if err := ctx.Err(); err != nil {
+		return Command{}, err
+	}
+	operationID, runID = strings.TrimSpace(operationID), strings.TrimSpace(runID)
+	if !safeID.MatchString(operationID) || !safeID.MatchString(runID) {
+		return Command{}, errors.New("valid operation and run IDs are required")
+	}
+	semantic := struct {
+		RunID string `json:"run_id"`
+	}{runID}
+	fingerprint, _ := semanticFingerprint("queue_cancel", semantic)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.readUnlocked()
+	if err != nil {
+		return Command{}, err
+	}
+	if operation, found := findOperation(state, operationID); found {
+		if operation.Fingerprint != fingerprint {
+			return Command{}, ErrConflict
+		}
+		return state.Commands[operation.EntityID], nil
+	}
+	lease, found := state.RunLeases[runID]
+	if !found {
+		return Command{}, ErrLease
+	}
+	now := s.now()
+	command := Command{ID: internalOperationID("cancel", operationID), ComputerID: lease.ComputerID, Kind: "cancel_run", AgentID: lease.AgentID, CancelRunID: runID, State: CommandQueued, CreatedAt: now, UpdatedAt: now}
+	state.Commands[command.ID] = command
+	appendOperation(&state, operationID, "queue_cancel", fingerprint, command.ID, now)
+	if err := s.writeUnlocked(state); err != nil {
+		return Command{}, err
+	}
+	return command, nil
+}
+
 func (s *Store) PollCommand(ctx context.Context, computerID, leaseID string) (Command, error) {
 	if err := ctx.Err(); err != nil {
 		return Command{}, err
@@ -320,7 +423,7 @@ func (s *Store) PollCommand(ctx context.Context, computerID, leaseID string) (Co
 	}
 	commands := make([]Command, 0)
 	for _, command := range state.Commands {
-		if command.ComputerID == computerID && (command.State == CommandQueued || command.State == CommandSent) {
+		if command.ComputerID == computerID && (command.State == CommandQueued || command.State == CommandSent && command.DeliveryLeaseID != leaseID) {
 			commands = append(commands, command)
 		}
 	}
@@ -329,7 +432,17 @@ func (s *Store) PollCommand(ctx context.Context, computerID, leaseID string) (Co
 	}
 	sort.Slice(commands, func(i, j int) bool { return commands[i].CreatedAt.Before(commands[j].CreatedAt) })
 	command := commands[0]
-	command.State, command.Attempt, command.UpdatedAt = CommandSent, command.Attempt+1, now
+	if command.Run != nil && command.Run.ExpectedCapabilityDigest != computer.CurrentCapability {
+		command.State, command.Error, command.UpdatedAt, command.DeliveryLeaseID = CommandFailed, "computer capability changed before dispatch", now, ""
+		state.Commands[command.ID] = command
+		fingerprint, _ := semanticFingerprint("capability_reject", struct{ Computer, Command, Capability string }{computerID, command.ID, computer.CurrentCapability})
+		appendOperation(&state, internalOperationID("capability-reject", command.ID, fmt.Sprint(computer.Revision)), "capability_reject", fingerprint, command.ID, now)
+		if err := s.writeUnlocked(state); err != nil {
+			return Command{}, err
+		}
+		return Command{}, ErrNoCommand
+	}
+	command.State, command.Attempt, command.UpdatedAt, command.DeliveryLeaseID = CommandSent, command.Attempt+1, now, leaseID
 	state.Commands[command.ID] = command
 	fingerprint, _ := semanticFingerprint("poll_command", struct{ Computer, Command string }{computerID, command.ID})
 	appendOperation(&state, internalOperationID("poll", command.ID, fmt.Sprint(command.Attempt)), "poll_command", fingerprint, command.ID, now)
@@ -355,11 +468,19 @@ func (s *Store) AckCommand(ctx context.Context, computerID, leaseID string, ack 
 		return Command{}, ErrLease
 	}
 	command, found := state.Commands[ack.CommandID]
-	if !found || command.ComputerID != computerID || command.State != CommandSent {
+	if !found || command.ComputerID != computerID || command.State != CommandSent || command.DeliveryLeaseID != leaseID {
 		return Command{}, ErrConflict
 	}
 	command.Error = strings.TrimSpace(ack.Error)
 	if ack.Success {
+		if command.Kind == "run_agent" {
+			if ack.Result == nil || command.Run == nil || ack.Result.RunID != command.Run.RunID || ack.Result.TaskID != command.Run.TaskID || ack.Result.CompletedAt.IsZero() {
+				return Command{}, errors.New("run acknowledgement requires a matching result")
+			}
+			result := *ack.Result
+			result.Evidence = append([]string(nil), result.Evidence...)
+			command.Result = &result
+		}
 		command.State = CommandAcked
 	} else {
 		command.State = CommandFailed
@@ -494,11 +615,33 @@ func validateState(state State) error {
 		}
 	}
 	for id, command := range state.Commands {
-		if id != command.ID || !safeID.MatchString(id) || state.Computers[command.ComputerID].ID == "" || !safeID.MatchString(command.AgentID) || command.Kind != "cleanup_agent" || command.Attempt < 0 || command.CreatedAt.IsZero() || command.UpdatedAt.IsZero() {
+		if id != command.ID || !safeID.MatchString(id) || state.Computers[command.ComputerID].ID == "" || !safeID.MatchString(command.AgentID) || command.Attempt < 0 || command.CreatedAt.IsZero() || command.UpdatedAt.IsZero() {
 			return errors.New("invalid daemon command")
+		}
+		switch command.Kind {
+		case "cleanup_agent":
+			if command.Run != nil || command.CancelRunID != "" || command.Result != nil {
+				return errors.New("cleanup command carries run data")
+			}
+		case "run_agent":
+			if command.Run == nil || validateRunRequest(*command.Run) != nil || command.Run.AgentID != command.AgentID || command.CancelRunID != "" {
+				return errors.New("invalid run command")
+			}
+			if command.Result != nil && validateRunResult(*command.Result) != nil {
+				return errors.New("invalid run command result")
+			}
+		case "cancel_run":
+			if !safeID.MatchString(command.CancelRunID) || command.Run != nil || command.Result != nil {
+				return errors.New("invalid cancel command")
+			}
+		default:
+			return errors.New("invalid daemon command kind")
 		}
 		if command.State != CommandQueued && command.State != CommandSent && command.State != CommandAcked && command.State != CommandFailed {
 			return errors.New("invalid daemon command state")
+		}
+		if command.State == CommandSent && !safeID.MatchString(command.DeliveryLeaseID) || command.State != CommandSent && command.DeliveryLeaseID != "" && command.Attempt == 0 {
+			return errors.New("invalid command delivery lease")
 		}
 	}
 	seenOperations := map[string]bool{}
@@ -522,6 +665,33 @@ func normalizeHello(hello Hello) Hello {
 		hello.Tools = map[string]string{}
 	}
 	return hello
+}
+
+func normalizeRunRequest(request RunRequest) RunRequest {
+	request.RunID, request.TaskID, request.AgentID = strings.TrimSpace(request.RunID), strings.TrimSpace(request.TaskID), strings.TrimSpace(request.AgentID)
+	request.Prompt, request.SessionID = strings.TrimSpace(request.Prompt), strings.TrimSpace(request.SessionID)
+	request.AgentRevisionID = strings.TrimSpace(request.AgentRevisionID)
+	request.RelationshipRevisionID = strings.TrimSpace(request.RelationshipRevisionID)
+	request.ExpectedCapabilityDigest = strings.ToLower(strings.TrimSpace(request.ExpectedCapabilityDigest))
+	request.ApprovedTools = normalizeStrings(request.ApprovedTools)
+	return request
+}
+
+func validateRunRequest(request RunRequest) error {
+	if !safeID.MatchString(request.RunID) || !safeID.MatchString(request.TaskID) || !safeID.MatchString(request.AgentID) || request.Mode != RunExecute && request.Mode != RunReview || request.Prompt == "" || !safeID.MatchString(request.AgentRevisionID) || !safeID.MatchString(request.RelationshipRevisionID) || !hexDigest.MatchString(request.ExpectedCapabilityDigest) || request.TimeoutSeconds <= 0 || request.TimeoutSeconds > 86400 || request.MaxTurns <= 0 || request.MaxTurns > 256 || request.TaskRevision <= 0 || request.TaskContractRevision <= 0 {
+		return errors.New("invalid run request")
+	}
+	return nil
+}
+
+func validateRunResult(result RunResult) error {
+	if !safeID.MatchString(result.RunID) || !safeID.MatchString(result.TaskID) || result.Terminal == "" || result.Summary == "" || result.StartedAt.IsZero() || result.CompletedAt.IsZero() || result.CompletedAt.Before(result.StartedAt) {
+		return errors.New("invalid run result")
+	}
+	if result.ArtifactHash != "" && !hexDigest.MatchString(result.ArtifactHash) || result.ArtifactHash != "" && result.ArtifactURI == "" {
+		return errors.New("invalid run result artifact")
+	}
+	return nil
 }
 
 func capabilityDigest(hello Hello) (string, error) {

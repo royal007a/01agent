@@ -20,6 +20,46 @@ const (
 	CommandFailed CommandState = "failed"
 )
 
+type RunMode string
+
+const (
+	RunExecute RunMode = "execute"
+	RunReview  RunMode = "review"
+)
+
+type RunRequest struct {
+	RunID                    string    `json:"run_id"`
+	TaskID                   string    `json:"task_id"`
+	AgentID                  string    `json:"agent_id"`
+	Mode                     RunMode   `json:"mode"`
+	Prompt                   string    `json:"prompt"`
+	SessionID                string    `json:"session_id,omitempty"`
+	AgentRevisionID          string    `json:"agent_revision_id"`
+	RelationshipRevisionID   string    `json:"relationship_revision_id"`
+	ExpectedCapabilityDigest string    `json:"expected_capability_digest"`
+	TimeoutSeconds           int64     `json:"timeout_seconds"`
+	MaxTurns                 int       `json:"max_turns"`
+	ApprovedTools            []string  `json:"approved_tools,omitempty"`
+	TaskRevision             int64     `json:"task_revision"`
+	TaskContractRevision     int64     `json:"task_contract_revision"`
+	DispatchedAt             time.Time `json:"dispatched_at"`
+}
+
+type RunResult struct {
+	RunID        string    `json:"run_id"`
+	TaskID       string    `json:"task_id"`
+	Success      bool      `json:"success"`
+	Terminal     string    `json:"terminal_reason"`
+	Summary      string    `json:"summary"`
+	Evidence     []string  `json:"evidence,omitempty"`
+	ArtifactURI  string    `json:"artifact_uri,omitempty"`
+	ArtifactHash string    `json:"artifact_sha256,omitempty"`
+	Decision     string    `json:"decision,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	CompletedAt  time.Time `json:"completed_at"`
+}
+
 type CapabilitySnapshot struct {
 	Revision  int64             `json:"revision"`
 	Digest    string            `json:"digest"`
@@ -62,15 +102,19 @@ type RunLease struct {
 }
 
 type Command struct {
-	ID         string       `json:"id"`
-	ComputerID string       `json:"computer_id"`
-	Kind       string       `json:"kind"`
-	AgentID    string       `json:"agent_id"`
-	State      CommandState `json:"state"`
-	Attempt    int          `json:"attempt"`
-	Error      string       `json:"error,omitempty"`
-	CreatedAt  time.Time    `json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
+	ID              string       `json:"id"`
+	ComputerID      string       `json:"computer_id"`
+	Kind            string       `json:"kind"`
+	AgentID         string       `json:"agent_id"`
+	Run             *RunRequest  `json:"run,omitempty"`
+	CancelRunID     string       `json:"cancel_run_id,omitempty"`
+	Result          *RunResult   `json:"result,omitempty"`
+	State           CommandState `json:"state"`
+	Attempt         int          `json:"attempt"`
+	DeliveryLeaseID string       `json:"delivery_lease_id,omitempty"`
+	Error           string       `json:"error,omitempty"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
 }
 
 type Operation struct {
@@ -128,9 +172,10 @@ type RunLeaseInput struct {
 }
 
 type CommandAck struct {
-	CommandID string `json:"command_id"`
-	Success   bool   `json:"success"`
-	Error     string `json:"error,omitempty"`
+	CommandID string     `json:"command_id"`
+	Success   bool       `json:"success"`
+	Error     string     `json:"error,omitempty"`
+	Result    *RunResult `json:"result,omitempty"`
 }
 
 type ClientMessage struct {

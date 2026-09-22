@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,10 +25,19 @@ func main() {
 	err := daemon.Run(ctx, daemon.Config{
 		ServerURL: *server, Token: os.Getenv("AGENT_API_TOKEN"), ComputerID: *computerID, RootDir: *root,
 		PollInterval: *interval, Tools: map[string]string{"01agent-daemon": "v1"}, Sandboxes: splitCSV(os.Getenv("AGENT_DAEMON_SANDBOXES")),
+		MaxConcurrent: envInt("AGENT_DAEMON_MAX_CONCURRENT", 2),
 	})
 	if err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
+}
+
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func envOr(key, fallback string) string {

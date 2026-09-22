@@ -117,6 +117,34 @@ the runtime and deterministic evaluator.
   exact Agent, be acknowledged, and remain inspectable on failure. Its failure
   MUST NOT roll back the completed binding.
 
+## Dispatcher and Daemon Run Protocol
+
+- A Dispatcher execution MUST bind one Product Task, its assigned Agent, and a
+  distinct Gate reviewer. It MUST preserve a canonical phase, retry counters,
+  active Run/command identity, result, cancellation reason, and operation
+  ledger across process restarts.
+- Dispatch MUST acquire an Agent/Computer Run lease and freeze the Agent
+  revision, Relationship revision, Session generation, Task/contract revision,
+  and Computer capability digest before queuing physical work. Offline nodes,
+  changed bindings, stale capabilities, and competing Runs MUST fail closed.
+- A `run_agent` command MUST carry a unique Run ID, bounded deadline/turns,
+  mode (`execute` or `review`), and exact prompt. A Daemon MUST acknowledge a
+  matching structured result; successful execution MUST name a durable
+  Artifact URI and SHA-256 digest.
+- A command sent on a live Daemon connection MUST NOT be redelivered on that
+  connection. An unacknowledged command MAY be redelivered after a new
+  connection lease; the Daemon MUST recover or resume the same Run ID.
+- An execution result MUST become an immutable Task Artifact and Handoff before
+  review. A parent waiting on open children MUST retain its result without
+  rerunning and submit only after the child barrier clears.
+- Gate review MUST execute on the configured reviewer's bound Computer and
+  inspect the exact Handoff Artifact versions. Reject MUST return to rework;
+  needs-human MUST stop automatic progress.
+- Cancellation MUST enqueue `cancel_run` for active work, release its Run
+  lease, close the open Task, and ignore late results. Retriable failures MUST
+  use a new Run ID until the attempt bound; exhaustion MUST close the Task with
+  an inspectable reason.
+
 ## Evolution and team lockfiles
 
 - A candidate Agent revision MUST NOT become active merely because it was

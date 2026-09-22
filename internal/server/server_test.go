@@ -18,6 +18,8 @@ import (
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/automation"
+	"github.com/royal007a/01agent/internal/computer"
+	"github.com/royal007a/01agent/internal/dispatcher"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
@@ -362,6 +364,70 @@ func TestProductTaskV2HTTPDeliveryLifecycle(t *testing.T) {
 	loadedArtifact := call(http.MethodGet, "/v2/artifacts/commit/versions/abc123", "")
 	if loadedArtifact.Code != http.StatusOK || !strings.Contains(loadedArtifact.Body.String(), `"digest":"`+digest+`"`) {
 		t.Fatalf("get artifact=%d %s", loadedArtifact.Code, loadedArtifact.Body.String())
+	}
+}
+
+func TestDispatcherHTTPStartListReconcileAndCancel(t *testing.T) {
+	root := t.TempDir()
+	tasks, err := workitem.New(filepath.Join(root, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents, err := agentregistry.New(filepath.Join(root, "agents"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	computers, err := computer.New(filepath.Join(root, "computers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := dispatcher.New(filepath.Join(root, "dispatcher"), tasks, agents, computers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"worker", "reviewer"} {
+		if _, err := agents.Create(context.Background(), agentregistry.CreateInput{OperationID: "create-" + id, ID: id, WorkspaceID: "workspace", Name: id, CreatedBy: "owner", PromptRef: "prompt.md", Model: "test", MyRole: "member", SessionID: "session-" + id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tasks.Create(context.Background(), workitem.Create{OperationID: "create-task", ID: "task", WorkspaceID: "workspace", ChannelID: "channel", CreatorID: "owner", Title: "Ship", Objective: "ship", Requirements: []workitem.Requirement{{ID: "R1", Text: "verified"}}, Scope: workitem.Scope{Allow: []string{"."}}, StopConditions: []string{"done"}, AssigneeID: "worker", Gate: workitem.GateSpec{Kind: workitem.GateAgent, ReviewerID: "reviewer", Checks: []string{"R1"}, RequiredEvidence: []string{"artifact"}, OnReject: "return"}}); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), WorkItems: tasks, Agents: agents, Computers: computers, Dispatcher: dispatches})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	started := call(http.MethodPost, "/v2/dispatches", `{"operation_id":"start","id":"execution","task_id":"task","max_attempts":3,"timeout_seconds":30}`)
+	if started.Code != http.StatusCreated || !strings.Contains(started.Body.String(), `"phase":"pending_claim"`) {
+		t.Fatalf("start=%d %s", started.Code, started.Body.String())
+	}
+	listed := call(http.MethodGet, "/v2/dispatches", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"execution"`) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	reconciled := call(http.MethodPost, "/v2/dispatches/reconcile", "")
+	if reconciled.Code != http.StatusOK || !strings.Contains(reconciled.Body.String(), `"advanced"`) {
+		t.Fatalf("reconcile=%d %s", reconciled.Code, reconciled.Body.String())
+	}
+	canceled := call(http.MethodPost, "/v2/dispatches/execution/cancel", `{"operation_id":"cancel","reason":"operator canceled"}`)
+	if canceled.Code != http.StatusOK || !strings.Contains(canceled.Body.String(), `"phase":"canceling"`) {
+		t.Fatalf("cancel=%d %s", canceled.Code, canceled.Body.String())
+	}
+	finished := call(http.MethodPost, "/v2/dispatches/reconcile", "")
+	if finished.Code != http.StatusOK {
+		t.Fatalf("finish=%d %s", finished.Code, finished.Body.String())
+	}
+	task, err := tasks.Get(context.Background(), "task")
+	if err != nil || task.State != workitem.Closed {
+		t.Fatalf("task=%+v err=%v", task, err)
 	}
 }
 

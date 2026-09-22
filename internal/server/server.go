@@ -19,6 +19,7 @@ import (
 	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/automation"
 	"github.com/royal007a/01agent/internal/computer"
+	"github.com/royal007a/01agent/internal/dispatcher"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/schema"
@@ -53,6 +54,7 @@ type Config struct {
 	Attention        *attention.Store
 	Agents           *agentregistry.Store
 	Computers        *computer.Store
+	Dispatcher       *dispatcher.Store
 	Teams            *team.Store
 	Automations      *automation.Store
 	Sessions         *sessionstore.Store
@@ -230,6 +232,10 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v2/agents/{agentID}/run-leases", handler.authorize(handler.acquireAgentRunLease))
 	handler.mux.HandleFunc("POST /v2/runs/{runID}/computer-lease/release", handler.authorize(handler.releaseAgentRunLease))
 	handler.mux.HandleFunc("GET /v2/daemon/connect", handler.authorize(handler.daemonConnect))
+	handler.mux.HandleFunc("POST /v2/dispatches", handler.authorize(handler.startDispatch))
+	handler.mux.HandleFunc("GET /v2/dispatches", handler.authorize(handler.listDispatches))
+	handler.mux.HandleFunc("POST /v2/dispatches/reconcile", handler.authorize(handler.reconcileDispatches))
+	handler.mux.HandleFunc("POST /v2/dispatches/{executionID}/cancel", handler.authorize(handler.cancelDispatch))
 	handler.mux.HandleFunc("GET /v1/approvals", handler.authorize(handler.listApprovals))
 	handler.mux.HandleFunc("GET /v1/approvals/{approvalID}", handler.authorize(handler.getApproval))
 	handler.mux.HandleFunc("POST /v1/approvals/{approvalID}/decision", handler.authorize(handler.decideApproval))
