@@ -86,6 +86,13 @@ The daemon reconciles background tasks every `AGENT_TASK_RECONCILE_INTERVAL`
 `AGENT_TASK_HEARTBEAT_TIMEOUT` (two minutes by default) become `lost`; pending
 terminal delivery and parent-run consumption acknowledgements are also repaired.
 
+Product Automations are evaluated every `AGENT_AUTOMATION_TICK_INTERVAL` (five
+seconds by default). Schedule definitions, next-run timestamps, overlap skips,
+failure counters, and run history live below the persistent `AGENT_RUN_DIR`.
+Each dispatch creates a Product Task v2; a prior open Task prevents overlap,
+and repeated reported failures pause the schedule until an authenticated status
+operation resumes it.
+
 ## Computer daemon
 
 Register the execution device through authenticated `POST /v2/computers`, then

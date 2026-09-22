@@ -17,6 +17,7 @@ import (
 	"github.com/royal007a/01agent/internal/agentregistry"
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
+	"github.com/royal007a/01agent/internal/automation"
 	"github.com/royal007a/01agent/internal/computer"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
@@ -53,6 +54,7 @@ type Config struct {
 	Agents           *agentregistry.Store
 	Computers        *computer.Store
 	Teams            *team.Store
+	Automations      *automation.Store
 	Sessions         *sessionstore.Store
 	Approvals        *approvalstore.Store
 	ReadinessTTL     time.Duration
@@ -214,6 +216,11 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v2/agents/{agentID}/relationship-prs/{prID}/review", handler.authorize(handler.reviewAgentRelationshipPR))
 	handler.mux.HandleFunc("POST /v2/teams/select", handler.authorize(handler.selectTeam))
 	handler.mux.HandleFunc("GET /v2/teams/{teamID}/lockfiles/{version}", handler.authorize(handler.getTeamLockfile))
+	handler.mux.HandleFunc("POST /v2/automations", handler.authorize(handler.createAutomation))
+	handler.mux.HandleFunc("GET /v2/automations", handler.authorize(handler.listAutomations))
+	handler.mux.HandleFunc("POST /v2/automations/tick", handler.authorize(handler.tickAutomations))
+	handler.mux.HandleFunc("POST /v2/automations/{automationID}/reports", handler.authorize(handler.reportAutomation))
+	handler.mux.HandleFunc("POST /v2/automations/{automationID}/status", handler.authorize(handler.setAutomationStatus))
 	handler.mux.HandleFunc("POST /v2/computers", handler.authorize(handler.registerComputer))
 	handler.mux.HandleFunc("GET /v2/computers", handler.authorize(handler.listComputers))
 	handler.mux.HandleFunc("POST /v2/agents/{agentID}/computer-binding", handler.authorize(handler.rebindAgentComputer))

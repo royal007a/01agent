@@ -136,6 +136,22 @@ the runtime and deterministic evaluator.
   Runs already bound to a Lockfile MUST NOT change when a member is upgraded or
   rolled back.
 
+## Automation
+
+- An Automation MUST persist its interval, next due time, Task template,
+  failure threshold, status, and complete run history before acknowledgement.
+- A due run MUST materialize an ordinary Product Task with a deterministic ID,
+  so a scheduler restart or a partial cross-store commit cannot create a
+  duplicate Task.
+- A schedule MUST NOT dispatch while its preceding Product Task is still open.
+  The missed occurrence MUST be recorded as `skipped_overlap` and the next due
+  time advanced deterministically.
+- Product Tasks reaching `done` or `closed` MUST reconcile to succeeded or
+  failed Automation runs. Explicit reports MUST be rejected unless the bound
+  Task is already `done` for success or `closed` for failure.
+- Consecutive failures MUST pause the Automation at its configured threshold;
+  resuming MUST require an explicit idempotent status operation.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator

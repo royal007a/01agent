@@ -17,6 +17,7 @@ import (
 	"github.com/royal007a/01agent/internal/agentregistry"
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
+	"github.com/royal007a/01agent/internal/automation"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
@@ -336,6 +337,52 @@ func TestProductTaskV2HTTPDeliveryLifecycle(t *testing.T) {
 	loadedArtifact := call(http.MethodGet, "/v2/artifacts/commit/versions/abc123", "")
 	if loadedArtifact.Code != http.StatusOK || !strings.Contains(loadedArtifact.Body.String(), `"digest":"`+digest+`"`) {
 		t.Fatalf("get artifact=%d %s", loadedArtifact.Code, loadedArtifact.Body.String())
+	}
+}
+
+func TestAutomationHTTPDispatchAndOverlap(t *testing.T) {
+	root := t.TempDir()
+	workItems, err := workitem.New(filepath.Join(root, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	automations, err := automation.New(filepath.Join(root, "automations"), workItems)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), WorkItems: workItems, Automations: automations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	created := call(http.MethodPost, "/v2/automations", `{
+		"operation_id":"create-nightly","id":"nightly","name":"Nightly regression","every_seconds":60,
+		"start_at":"2026-09-22T08:00:00Z","failure_pause_threshold":2,
+		"template":{"workspace_id":"workspace","channel_id":"channel","creator_id":"scheduler","title":"Run suite","objective":"Produce verified result",
+		"requirements":[{"id":"R1","text":"run fixed suite"}],"scope":{"allow":["evals/"]},"stop_conditions":["result recorded"],"assignee_id":"runner",
+		"gate":{"kind":"code","reviewer_id":"evaluator","checks":["R1"],"required_evidence":["result log"],"on_reject":"return to runner"}}
+	}`)
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"status":"active"`) {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	first := call(http.MethodPost, "/v2/automations/tick", `{"at":"2026-09-22T08:00:00Z"}`)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"task_id":"nightly-run-1"`) {
+		t.Fatalf("first tick=%d %s", first.Code, first.Body.String())
+	}
+	overlap := call(http.MethodPost, "/v2/automations/tick", `{"at":"2026-09-22T08:01:00Z"}`)
+	if overlap.Code != http.StatusOK || !strings.Contains(overlap.Body.String(), `"state":"skipped_overlap"`) {
+		t.Fatalf("overlap=%d %s", overlap.Code, overlap.Body.String())
+	}
+	listed := call(http.MethodGet, "/v2/automations", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"nightly"`) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
 	}
 }
 

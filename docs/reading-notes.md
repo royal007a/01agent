@@ -320,3 +320,12 @@ team-compatibility result; Relationship PRs are rejected when their base has
 changed. Automatic team selection filters on required skills, tools, and
 permissions before scoring delivery history and cost. Its output is an
 immutable Team Lockfile, so later upgrades affect only later selections.
+
+Automation is implemented as a thin durable trigger above Product Task v2.
+Every interval occurrence either creates a deterministic Task, or records an
+overlap skip while the previous Task remains open. Terminal Task state is
+reconciled into the schedule history, consecutive failures can pause future
+dispatch, and restart does not duplicate an already-created Task. Channel
+messages and Threads are intentionally not fabricated by this layer; adapters
+may add them while the Automation remains the source of timing and Task
+creation.

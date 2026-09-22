@@ -18,6 +18,7 @@ import (
 	"github.com/royal007a/01agent/internal/agentregistry"
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
+	"github.com/royal007a/01agent/internal/automation"
 	"github.com/royal007a/01agent/internal/computer"
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
@@ -167,6 +168,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize team store: %w", err)
 	}
+	automations, err := automation.New(filepath.Join(store.Dir(), "automations"), workItems)
+	if err != nil {
+		return fmt.Errorf("initialize automation store: %w", err)
+	}
 	var compactor engine.ContextCompactor
 	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
 		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5, Archive: archive}
@@ -194,6 +199,7 @@ func run() error {
 		Agents:           agents,
 		Computers:        computers,
 		Teams:            teams,
+		Automations:      automations,
 		Sessions:         sessions,
 		Approvals:        approvals,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),
@@ -223,6 +229,20 @@ func run() error {
 			case <-ticker.C:
 				if err := reconcileTasks(context.WithoutCancel(ctx), tasks, taskHeartbeatTimeout); err != nil {
 					log.Printf("background task reconciliation failed: %v", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(envDuration("AGENT_AUTOMATION_TICK_INTERVAL", 5*time.Second))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if _, err := automations.Tick(context.WithoutCancel(ctx), now.UTC()); err != nil {
+					log.Printf("automation scheduler failed: %v", err)
 				}
 			}
 		}

@@ -50,6 +50,8 @@ lesson 13:
 - reviewable Relationship PRs, evaluator-backed Agent revision selection, and
   capability/budget-aware automatic team selection that emits immutable Team
   Lockfiles;
+- restart-safe interval Automations that materialize Product Tasks, skip
+  overlapping work, and pause after a configurable consecutive-failure limit;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
 - a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
   both used as required CI gates;
@@ -280,6 +282,15 @@ only to Agents satisfying required skills, tools, and permissions, incorporates
 delivery scores, enforces the model-cost budget, and writes exact Agent and
 Relationship revision IDs into a versioned Team Lockfile. Older Lockfiles stay
 unchanged when members evolve.
+
+Automations use `POST/GET /v2/automations`; the service scheduler evaluates
+them every `AGENT_AUTOMATION_TICK_INTERVAL` (five seconds by default). Each due
+run creates a normal Product Task with the configured requirements, scope,
+stop conditions, assignee, and Gate. A still-open prior Task produces a durable
+`skipped_overlap` run instead of duplicate work. Done/closed Tasks are
+reconciled on the next tick, and explicit failure reports pause the schedule at
+its configured threshold. Automation deliberately schedules Tasks only;
+message and Thread creation remain channel-adapter responsibilities.
 
 ## Feishu bridge
 

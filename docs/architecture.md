@@ -139,6 +139,13 @@ runs deterministic capability/budget matching and writes a versioned Team
 Lockfile with the exact Agent/Relationship revisions. It never resolves
 "current" dynamically for an already selected version.
 
+`automation.Store` is the restart-safe scheduler above Product Task v2. Its
+canonical schedule ledger advances due times and records dispatch, overlap
+skip, success, and failure. Dispatch IDs are derived from Automation and run
+sequence, so a Task committed before an interrupted Automation write is reused
+on retry. The scheduler never runs arbitrary work itself: every occurrence is
+an inspectable Task with the normal claim, Handoff, Artifact, and Gate rules.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit
