@@ -38,6 +38,9 @@ lesson 13:
   result delivery, and consumption acknowledgement;
 - a distinct product Task v2 control plane with revision-CAS claims, immutable
   Artifacts, structured Handoffs, parent/child barriers, and evidence-bound Gates;
+- a durable Agent Inbox with priority scheduling, per-Agent execution leases,
+  coalesced conversation delivery, persistent work marks, and an atomic
+  `read_seq` freshness barrier that retains stale replies as drafts;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
 - a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
   both used as required CI gates;
@@ -226,6 +229,17 @@ lease to attach an immutable Artifact and submit a Handoff. The configured
 Gate checks the exact submitted Artifact versions; `pass`, `reject`, and
 `needs_human` transition to `done`, `in_progress`, and `in_review`
 respectively. Open child Tasks prevent their parent from entering review.
+
+Agent attention uses `POST /v2/conversations/{conversationID}/messages` to
+append a sequenced message and route it to Agent inboxes. An Agent claims one
+item through `POST /v2/agents/{agentID}/inbox/claim`, then either acknowledges
+or refreshes it through `POST /v2/inbox/{itemID}/actions`. Replies go through
+`POST /v2/inbox/{itemID}/fresh-replies`: checking `read_seq`, appending the
+reply, and acknowledging the inbox item happen under one durable transaction.
+If new messages arrived, the API returns `409`, the missed messages, and a
+persisted stale draft; the caller must refresh and deliberately revise or
+confirm its reply. Work marks have separate create/clear endpoints and are not
+cleared merely because an item became read or acknowledged.
 
 ## Feishu bridge
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/royal007a/01agent/internal/approvalstore"
+	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/runstore"
 	"github.com/royal007a/01agent/internal/schema"
@@ -334,6 +335,57 @@ func TestProductTaskV2HTTPDeliveryLifecycle(t *testing.T) {
 	loadedArtifact := call(http.MethodGet, "/v2/artifacts/commit/versions/abc123", "")
 	if loadedArtifact.Code != http.StatusOK || !strings.Contains(loadedArtifact.Body.String(), `"digest":"`+digest+`"`) {
 		t.Fatalf("get artifact=%d %s", loadedArtifact.Code, loadedArtifact.Body.String())
+	}
+}
+
+func TestAgentInboxFreshnessHTTPBarrier(t *testing.T) {
+	attentionStore, err := attention.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Attention: attentionStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	published := call(http.MethodPost, "/v2/conversations/chat/messages", `{"operation_id":"op-publish-1","message_id":"message-1","author_id":"human","kind":"human","content":"start","deliveries":[{"agent_id":"lucy","priority":"direct"}]}`)
+	if published.Code != http.StatusCreated || !strings.Contains(published.Body.String(), `"seq":1`) {
+		t.Fatalf("publish=%d %s", published.Code, published.Body.String())
+	}
+	claimed := call(http.MethodPost, "/v2/agents/lucy/inbox/claim", `{"operation_id":"op-claim","lease_id":"lease","ttl_seconds":60}`)
+	if claimed.Code != http.StatusOK || !strings.Contains(claimed.Body.String(), `"claim_read_seq":1`) {
+		t.Fatalf("claim=%d %s", claimed.Code, claimed.Body.String())
+	}
+	state, err := attentionStore.GetState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var itemID string
+	for id := range state.Inbox {
+		itemID = id
+	}
+	corrected := call(http.MethodPost, "/v2/conversations/chat/messages", `{"operation_id":"op-publish-2","message_id":"message-2","author_id":"human","kind":"human","content":"change direction","deliveries":[{"agent_id":"lucy","priority":"human_correction"}]}`)
+	if corrected.Code != http.StatusCreated {
+		t.Fatalf("correction=%d %s", corrected.Code, corrected.Body.String())
+	}
+	stale := call(http.MethodPost, "/v2/inbox/"+itemID+"/fresh-replies", `{"operation_id":"op-stale","message_id":"reply-old","agent_id":"lucy","lease_id":"lease","read_seq":1,"content":"old answer"}`)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"message-2"`) || !strings.Contains(stale.Body.String(), `"old answer"`) {
+		t.Fatalf("stale=%d %s", stale.Code, stale.Body.String())
+	}
+	refreshed := call(http.MethodPost, "/v2/inbox/"+itemID+"/actions", `{"action":"refresh","operation_id":"op-refresh","agent_id":"lucy","lease_id":"lease"}`)
+	if refreshed.Code != http.StatusOK || !strings.Contains(refreshed.Body.String(), `"claim_read_seq":2`) {
+		t.Fatalf("refresh=%d %s", refreshed.Code, refreshed.Body.String())
+	}
+	sent := call(http.MethodPost, "/v2/inbox/"+itemID+"/fresh-replies", `{"operation_id":"op-reply","message_id":"reply-new","agent_id":"lucy","lease_id":"lease","read_seq":2,"content":"revised answer"}`)
+	if sent.Code != http.StatusCreated || !strings.Contains(sent.Body.String(), `"seq":3`) {
+		t.Fatalf("send=%d %s", sent.Code, sent.Body.String())
 	}
 }
 

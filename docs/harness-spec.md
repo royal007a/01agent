@@ -60,6 +60,26 @@ the runtime and deterministic evaluator.
 - Canonical Task and Artifact writes MUST be atomic, synced, and read back
   before acknowledgement.
 
+## Agent attention and freshness
+
+- Permission to read a conversation MUST remain separate from the decision to
+  wake an Agent. Deliverable messages MUST enter a durable Agent-level Inbox.
+- Human corrections MUST outrank direct requests, Task reviews, and ordinary
+  subscriptions. Pending messages for the same Agent and conversation MUST
+  coalesce without discarding the original sequenced messages.
+- By default an Agent MUST hold at most one active Inbox execution lease.
+  Expired leases MUST make the same work claimable after restart.
+- Claiming an item MUST record the conversation `read_seq`. Read cursors,
+  Inbox acknowledgement, persistent work marks, and product Task completion
+  are distinct states; changing one MUST NOT imply the others.
+- Sending a reply MUST atomically compare the supplied `read_seq` with the
+  conversation's current sequence, append the reply, and acknowledge the
+  Inbox item. When the sequence is stale, no reply may be published; the draft
+  and newly arrived messages MUST be persisted and returned for re-reading.
+- Refreshing after a stale result MUST advance the claim's read snapshot under
+  the same lease. The revised or explicitly confirmed reply MUST pass the
+  freshness check again.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator

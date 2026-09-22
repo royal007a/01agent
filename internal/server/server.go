@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/royal007a/01agent/internal/approvalstore"
+	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/provider"
 	"github.com/royal007a/01agent/internal/schema"
@@ -45,6 +46,7 @@ type Config struct {
 	InputEnqueuer    engine.InputEnqueuer
 	Tasks            *taskstore.Store
 	WorkItems        *workitem.Store
+	Attention        *attention.Store
 	Sessions         *sessionstore.Store
 	Approvals        *approvalstore.Store
 	ReadinessTTL     time.Duration
@@ -114,6 +116,23 @@ type workItemActionRequest struct {
 	GateResult       workitem.GateResult    `json:"gate_result,omitempty"`
 }
 
+type inboxClaimRequest struct {
+	OperationID string `json:"operation_id"`
+	LeaseID     string `json:"lease_id,omitempty"`
+	TTLSeconds  int64  `json:"ttl_seconds"`
+}
+
+type inboxActionRequest struct {
+	Action      string `json:"action"`
+	OperationID string `json:"operation_id"`
+	AgentID     string `json:"agent_id"`
+	LeaseID     string `json:"lease_id"`
+}
+
+type clearWorkMarkRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
 type approvalDecisionRequest struct {
 	Decision approvalstore.State `json:"decision"`
 	Actor    string              `json:"actor,omitempty"`
@@ -167,6 +186,12 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v2/tasks/{taskID}/actions", handler.authorize(handler.workItemAction))
 	handler.mux.HandleFunc("POST /v2/tasks/{taskID}/artifacts", handler.authorize(handler.addWorkItemArtifact))
 	handler.mux.HandleFunc("GET /v2/artifacts/{artifactID}/versions/{version}", handler.authorize(handler.getWorkItemArtifact))
+	handler.mux.HandleFunc("POST /v2/conversations/{conversationID}/messages", handler.authorize(handler.publishAttentionMessage))
+	handler.mux.HandleFunc("POST /v2/agents/{agentID}/inbox/claim", handler.authorize(handler.claimAgentInbox))
+	handler.mux.HandleFunc("POST /v2/inbox/{itemID}/actions", handler.authorize(handler.agentInboxAction))
+	handler.mux.HandleFunc("POST /v2/inbox/{itemID}/fresh-replies", handler.authorize(handler.sendFreshReply))
+	handler.mux.HandleFunc("POST /v2/agents/{agentID}/work-marks", handler.authorize(handler.setAgentWorkMark))
+	handler.mux.HandleFunc("POST /v2/agents/{agentID}/work-marks/{conversationID}/clear", handler.authorize(handler.clearAgentWorkMark))
 	handler.mux.HandleFunc("GET /v1/approvals", handler.authorize(handler.listApprovals))
 	handler.mux.HandleFunc("GET /v1/approvals/{approvalID}", handler.authorize(handler.getApproval))
 	handler.mux.HandleFunc("POST /v1/approvals/{approvalID}/decision", handler.authorize(handler.decideApproval))

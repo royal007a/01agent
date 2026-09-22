@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/royal007a/01agent/internal/approvalstore"
+	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/contextmanager"
 	"github.com/royal007a/01agent/internal/engine"
 	"github.com/royal007a/01agent/internal/memory"
@@ -147,6 +148,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize product task store: %w", err)
 	}
+	attentionStore, err := attention.New(filepath.Join(store.Dir(), "attention"))
+	if err != nil {
+		return fmt.Errorf("initialize agent attention store: %w", err)
+	}
 	var compactor engine.ContextCompactor
 	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
 		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5, Archive: archive}
@@ -170,6 +175,7 @@ func run() error {
 		InputEnqueuer:    store,
 		Tasks:            tasks,
 		WorkItems:        workItems,
+		Attention:        attentionStore,
 		Sessions:         sessions,
 		Approvals:        approvals,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),

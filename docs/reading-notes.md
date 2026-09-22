@@ -288,12 +288,13 @@ to behave, so Bash is never included in the child registry.
 
 ## Agent Team control-plane follow-up
 
-The first control-plane slice intentionally separates a product Task from the
+The first control-plane slices intentionally separate a product Task from the
 existing background execution Job. Task v2 now owns requirements, scope, stop
 conditions, atomic claim leases, immutable Artifact versions, structured
 Handoffs, parent/child completion, and evidence-bound Gate decisions. Canonical
 writes use operation identity, semantic fingerprints, revision CAS, atomic
-replace, directory sync, and read-back verification. The next dependency is an
-Agent-level Inbox with persistent work marks and a `read_seq` freshness barrier;
-persistent Agent/Relationship, Session generations, Computers, and automation
-remain later layers rather than being implied by Task v2.
+replace, directory sync, and read-back verification. The Agent-level Inbox now
+adds priority/coalescing, one active execution lease, independent read cursors
+and work marks, plus an atomic `read_seq` reply barrier with stale-draft
+recovery. Persistent Agent/Relationship, Session generations, Computers, and
+automation remain later layers rather than being implied by these stores.

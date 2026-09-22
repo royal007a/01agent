@@ -103,6 +103,16 @@ revision CAS, atomically persisted, synced, and read back. The HTTP surface is
 namespaced under `/v2/tasks` so callers cannot confuse delivery responsibility
 with a background process.
 
+`attention.Store` owns the shared message sequence, Agent-level Inbox,
+per-conversation read cursors, persistent work marks, and stale drafts in one
+canonical file transaction. Delivery coalesces messages for the same Agent and
+conversation while retaining every original message. Claim order is human
+correction, direct request, Task review, then subscription, with a single
+active thinking lease per Agent. `SendFresh` validates both the Inbox lease and
+the claim's `read_seq`; only an unchanged conversation can atomically receive a
+reply and acknowledge the item. A changed sequence saves the old answer as a
+draft and returns the missed messages instead of publishing obsolete text.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit
