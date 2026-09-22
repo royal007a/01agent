@@ -169,6 +169,14 @@ executions require a bearer token. `/readyz` performs a real, cached provider
 probe rather than reporting configuration presence as readiness. If model
 variables are missing or the probe fails, it and `/v1/runs` return `503`.
 
+`GET /` serves the built-in responsive control-plane console. It shows service
+status, Product Tasks, persistent Agents, Computers, and Automations, and
+includes a same-origin API console for the remaining operations. The HTML shell
+is public, while all control-plane data stays behind the existing bearer-token
+checks. The browser keeps the supplied token in `sessionStorage` only. All
+asset and API URLs are relative, so the console works both at `/` and behind a
+reverse-proxy prefix such as `/01agent/`.
+
 ```bash
 export AGENT_API_TOKEN="$(openssl rand -hex 32)"
 docker run -d --name 01agent-http -p 8080:8080 \

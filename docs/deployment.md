@@ -46,6 +46,15 @@ minutes by default). `POST /v1/runs` requires
 `Authorization: Bearer $AGENT_API_TOKEN` and a JSON body such as
 `{"prompt":"Summarize README.md"}`.
 
+The same listener serves a dependency-free management console at `GET /`.
+Because it uses relative URLs, a reverse proxy may expose the complete service
+under a prefix such as `/01agent/` as long as that prefix is stripped before
+proxying. The page can load without credentials, but it cannot read or mutate
+control-plane data until the operator supplies the bearer token; that value is
+kept only for the current browser session. If the endpoint is deliberately
+served over plain HTTP, restrict it to a trusted network because the bearer
+token is not protected in transit.
+
 The service limits request bodies, concurrent runs, total run time, turns,
 repeated calls, provider traffic, and tool duration. Persist `AGENT_RUN_DIR` so
 traces, canonical history, session turns, raw context archives, plan/TODO state,

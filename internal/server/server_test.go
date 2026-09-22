@@ -151,6 +151,31 @@ func TestHandlerReportsNotReadyWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestWebConsoleIsPublicAndHardened(t *testing.T) {
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "01agent Control Plane") {
+		t.Fatalf("page=%d %s", page.Code, page.Body.String())
+	}
+	if policy := page.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "connect-src 'self'") || !strings.Contains(policy, "frame-ancestors 'none'") {
+		t.Fatalf("content security policy=%q", policy)
+	}
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+	if asset.Code != http.StatusOK || asset.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(asset.Body.String(), "sessionStorage") {
+		t.Fatalf("asset=%d headers=%v", asset.Code, asset.Header())
+	}
+	protected := httptest.NewRecorder()
+	handler.ServeHTTP(protected, httptest.NewRequest(http.MethodGet, "/v2/tasks", nil))
+	if protected.Code != http.StatusUnauthorized {
+		t.Fatalf("protected endpoint became public: %d", protected.Code)
+	}
+}
+
 func TestHandlerRequiresToken(t *testing.T) {
 	if _, err := New(Config{WorkDir: t.TempDir(), Registry: tools.NewRegistry()}); err == nil {
 		t.Fatal("New accepted an empty token")

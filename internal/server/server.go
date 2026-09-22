@@ -184,6 +184,9 @@ func New(config Config) (*Handler, error) {
 		config.ReadinessTimeout = 10 * time.Second
 	}
 	handler := &Handler{config: config, semaphore: make(chan struct{}, config.MaxConcurrent), mux: http.NewServeMux()}
+	handler.mux.HandleFunc("GET /", handler.webConsole)
+	handler.mux.HandleFunc("GET /app.js", handler.webConsoleAsset)
+	handler.mux.HandleFunc("GET /styles.css", handler.webConsoleAsset)
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.HandleFunc("GET /readyz", handler.ready)
 	handler.mux.HandleFunc("POST /v1/runs", handler.authorize(handler.run))
