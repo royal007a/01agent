@@ -9,6 +9,7 @@ build:
 	go build -trimpath -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -trimpath -o bin/01agent-eval ./cmd/01agent-eval
 	go build -trimpath -o bin/01agent-control-eval ./cmd/01agent-control-eval
+	go build -trimpath -o bin/01agent-daemon ./cmd/01agent-daemon
 	go build -trimpath -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -trimpath -o bin/01agent-sandbox ./cmd/01agent-sandbox
 
@@ -30,9 +31,10 @@ verify:
 	go build -o bin/01agent-feishu ./cmd/01agent-feishu
 	go build -o bin/01agent-eval ./cmd/01agent-eval
 	go build -o bin/01agent-control-eval ./cmd/01agent-control-eval
+	go build -o bin/01agent-daemon ./cmd/01agent-daemon
 	go build -o bin/01agent-replay ./cmd/01agent-replay
 	GOOS=linux go build -o bin/01agent-sandbox ./cmd/01agent-sandbox
 	$(MAKE) eval
 
 clean:
-	rm -f bin/01agent bin/01agentd bin/01agent-feishu bin/01agent-eval bin/01agent-control-eval bin/01agent-replay bin/01agent-sandbox coverage.out
+	rm -f bin/01agent bin/01agentd bin/01agent-feishu bin/01agent-eval bin/01agent-control-eval bin/01agent-daemon bin/01agent-replay bin/01agent-sandbox coverage.out

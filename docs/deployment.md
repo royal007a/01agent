@@ -86,6 +86,27 @@ The daemon reconciles background tasks every `AGENT_TASK_RECONCILE_INTERVAL`
 `AGENT_TASK_HEARTBEAT_TIMEOUT` (two minutes by default) become `lost`; pending
 terminal delivery and parent-run consumption acknowledgements are also repaired.
 
+## Computer daemon
+
+Register the execution device through authenticated `POST /v2/computers`, then
+run the bundled outbound client:
+
+```bash
+export AGENT_SERVER_URL=https://agent.example.com
+export AGENT_API_TOKEN=xxx
+export AGENT_COMPUTER_ID=builder-1
+export AGENT_DAEMON_ROOT=/var/lib/01agent-daemon
+/usr/local/bin/01agent-daemon
+```
+
+The Server needs no inbound route to the device. The client opens
+`/v2/daemon/connect`, reports a revisioned capability snapshot, and maintains a
+short lease while polling for typed commands. The root must be dedicated to the
+Daemon. Old-device cleanup is limited to
+`$AGENT_DAEMON_ROOT/agents/<agent-id>`; code, credentials, Provider sessions,
+and data outside that root are not migrated or deleted. Configure the reverse
+proxy to preserve WebSocket upgrades for this endpoint.
+
 ## Feishu bridge
 
 Run the HTTP service and bridge against the same durable deployment. The bridge

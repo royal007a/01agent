@@ -98,6 +98,25 @@ the runtime and deterministic evaluator.
   facts; open work, pending reviews, available work, and unresolved items MUST
   remain explicit rather than being converted into unqualified facts.
 
+## Computers and outbound Daemons
+
+- A Computer MUST be a persistent execution identity distinct from an Agent.
+  A Daemon MUST initiate the authenticated connection to the Server; inbound
+  access to the execution device is not required.
+- Each connection MUST hold a short lease and publish a content-digested,
+  revisioned capability snapshot covering OS, architecture, runtime, declared
+  tools, and sandbox backends. A competing live lease MUST fail closed.
+- Agent binding MUST be direct (never temporarily unbound), revision-CAS
+  guarded, and permitted only when the target Computer has a live lease and
+  the Agent has no active run lease.
+- Rebinding MUST preserve Server-side identity, Relationships, Tasks, messages,
+  and Run history. It MUST NOT claim to migrate local files, credentials, or
+  Provider sessions.
+- A move between Computers MUST enqueue a durable cleanup command for the old
+  Daemon. Cleanup MUST be confined to the Daemon-managed directory for the
+  exact Agent, be acknowledged, and remain inspectable on failure. Its failure
+  MUST NOT roll back the completed binding.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator

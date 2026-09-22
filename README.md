@@ -44,6 +44,9 @@ lesson 13:
 - stable Agent identities with immutable configuration and Relationship
   revisions plus explicit Session generations, retirement, and continuity
   Handoffs;
+- registered Computers with revisioned capability snapshots, outbound-only
+  Daemon WebSockets, run-lease-safe Agent rebinding, and tracked old-device
+  cleanup;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
 - a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
   both used as required CI gates;
@@ -131,7 +134,7 @@ See [the architecture](docs/architecture.md) and
 make verify
 ```
 
-`make verify` formats-checks, vets, runs race-enabled tests, builds all seven
+`make verify` formats-checks, vets, runs race-enabled tests, builds all eight
 binaries, and executes the 30-case deterministic runtime suite plus the
 15-case Task v2 state-machine suite. The runtime evaluator
 records success rate, tool-sequence correctness, terminal reason, turns, token
@@ -252,6 +255,17 @@ contracts remain inspectable. Session rotation is explicit through
 active generation with a structured continuity Handoff and creates one new
 active Session generation. Agent identity, revisions, and work ownership
 therefore survive Session replacement.
+
+Computers are registered through `POST /v2/computers`. `01agent-daemon` then
+opens an authenticated outbound WebSocket to `/v2/daemon/connect`, publishes a
+digest-backed OS/architecture/runtime/tool/sandbox snapshot, and renews a
+short connection lease while polling. Agent binding uses
+`POST /v2/agents/{agentID}/computer-binding`; the server rejects offline
+targets, stale binding revisions, and Agents with active run leases. A
+successful move queues `cleanup_agent` for the old Computer. The Daemon removes
+only `<daemon-root>/agents/<agentID>` through a rename-to-trash step and reports
+`acked` or `failed`; cleanup failure is visible but never rolls back the new
+binding. Credentials and paths outside the Daemon-managed root are untouched.
 
 ## Feishu bridge
 

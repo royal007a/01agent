@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.72.0
+	github.com/coder/websocket v1.8.15
 	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
 	github.com/openai/openai-go/v3 v3.61.0

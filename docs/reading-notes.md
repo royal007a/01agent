@@ -305,3 +305,11 @@ one active Session generation. Rotation uses expected-version checks, retires
 the old generation with scope/tasks/references/facts/unresolved items, and
 opens a distinct Session ID. Computer binding and automated rotation policy
 remain separate concerns rather than being hidden inside Session storage.
+
+Computer binding is now another explicit control-plane layer. Registered
+Daemons connect outbound, maintain short leases, and publish immutable
+capability snapshots. A binding update is rejected while an Agent has a live
+Run lease or the target Computer is offline. After a successful move, cleanup
+of the old Daemon-owned Agent directory is a separate durable command with an
+acknowledged outcome; a cleanup failure stays visible without rewriting the
+new binding.

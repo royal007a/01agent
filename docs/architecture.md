@@ -121,6 +121,15 @@ structured continuity Handoff and a unique next Session becomes active. Old
 roles, collaboration contracts, session IDs, and Handoffs remain inspectable
 after restart instead of being rewritten in place.
 
+`computer.Store` persists Computer registrations, short connection leases,
+digest-backed capability revisions, Agent bindings, active Run leases, and
+Daemon commands. `01agent-daemon` opens the WebSocket outbound and uses a
+poll/ack protocol, so the Server never needs inbound device access. Binding is
+revision checked and requires a live target plus no active Agent Run. Moving
+an Agent queues cleanup on the old Computer; the Daemon renames the exact
+managed Agent directory into its private trash before removal, acknowledges
+success/failure, and never touches credentials or paths outside its root.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit
