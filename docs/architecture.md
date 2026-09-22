@@ -113,6 +113,14 @@ the claim's `read_seq`; only an unchanged conversation can atomically receive a
 reply and acknowledge the item. A changed sequence saves the old answer as a
 draft and returns the missed messages instead of publishing obsolete text.
 
+`agentregistry.Store` separates a long-lived Agent identity from its current
+model Session. Each Agent points to immutable configuration and Relationship
+revisions and has exactly one active Session generation. Rotation is an
+explicit revision-CAS transition: the expected generation is retired with a
+structured continuity Handoff and a unique next Session becomes active. Old
+roles, collaboration contracts, session IDs, and Handoffs remain inspectable
+after restart instead of being rewritten in place.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit

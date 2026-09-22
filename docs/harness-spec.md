@@ -80,6 +80,24 @@ the runtime and deterministic evaluator.
   the same lease. The revised or explicitly confirmed reply MUST pass the
   freshness check again.
 
+## Persistent Agents, Relationships, and Sessions
+
+- Agent identity MUST be stable across Runs, Session generations, process
+  restarts, and future Computer rebinding. It MUST NOT be represented only by
+  a model conversation ID.
+- Agent configuration and team Relationships MUST be immutable revisions.
+  The current pointers MUST resolve to an append-only historical record, and
+  changes MUST use operation idempotency plus revision CAS.
+- A Relationship revision MUST state the Agent's own role and, for each
+  teammate, the role plus delegation/collaboration triggers, expected inputs,
+  and report-back contract when present.
+- An Agent MUST have exactly one active Session generation. Rotation MUST bind
+  the expected Agent revision and Session generation, retire the old Session,
+  persist a structured Handoff, and create a new unique Session ID.
+- A Session Handoff MUST include scope, durable references, and confirmed
+  facts; open work, pending reviews, available work, and unresolved items MUST
+  remain explicit rather than being converted into unqualified facts.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator

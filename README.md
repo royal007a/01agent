@@ -41,6 +41,9 @@ lesson 13:
 - a durable Agent Inbox with priority scheduling, per-Agent execution leases,
   coalesced conversation delivery, persistent work marks, and an atomic
   `read_seq` freshness barrier that retains stale replies as drafts;
+- stable Agent identities with immutable configuration and Relationship
+  revisions plus explicit Session generations, retirement, and continuity
+  Handoffs;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
 - a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
   both used as required CI gates;
@@ -240,6 +243,15 @@ If new messages arrived, the API returns `409`, the missed messages, and a
 persisted stale draft; the caller must refresh and deliberately revise or
 confirm its reply. Work marks have separate create/clear endpoints and are not
 cleared merely because an item became read or acknowledged.
+
+Persistent Agent identities use `POST/GET /v2/agents`. Relationship changes
+append a new immutable revision through
+`POST /v2/agents/{agentID}/relationships/revisions`; older role and delegation
+contracts remain inspectable. Session rotation is explicit through
+`POST /v2/agents/{agentID}/sessions/rotate`: it retires exactly the expected
+active generation with a structured continuity Handoff and creates one new
+active Session generation. Agent identity, revisions, and work ownership
+therefore survive Session replacement.
 
 ## Feishu bridge
 

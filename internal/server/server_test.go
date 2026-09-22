@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/royal007a/01agent/internal/agentregistry"
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/engine"
@@ -386,6 +387,41 @@ func TestAgentInboxFreshnessHTTPBarrier(t *testing.T) {
 	sent := call(http.MethodPost, "/v2/inbox/"+itemID+"/fresh-replies", `{"operation_id":"op-reply","message_id":"reply-new","agent_id":"lucy","lease_id":"lease","read_seq":2,"content":"revised answer"}`)
 	if sent.Code != http.StatusCreated || !strings.Contains(sent.Body.String(), `"seq":3`) {
 		t.Fatalf("send=%d %s", sent.Code, sent.Body.String())
+	}
+}
+
+func TestPersistentAgentRelationshipAndSessionGenerationHTTP(t *testing.T) {
+	agents, err := agentregistry.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), Agents: agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	created := call(http.MethodPost, "/v2/agents", `{"operation_id":"op-create","id":"lili","workspace_id":"workspace","name":"Lili","created_by":"owner","prompt_ref":"prompts/lili.md","skills":["review"],"model":"model-a","my_role":"engineer","session_id":"session-1"}`)
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"current_session_generation":1`) {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	revised := call(http.MethodPost, "/v2/agents/lili/relationships/revisions", `{"operation_id":"op-rel","expected_revision":1,"actor_id":"owner","my_role":"lead","reason":"proven delegation","teammates":[{"agent_id":"lucy","role":"database","delegate_when":["schema"],"report_back_with":["tests","rollback"]}]}`)
+	if revised.Code != http.StatusCreated || !strings.Contains(revised.Body.String(), `"current_relationship_revision_id":"relationship-v2"`) {
+		t.Fatalf("revise=%d %s", revised.Code, revised.Body.String())
+	}
+	rotated := call(http.MethodPost, "/v2/agents/lili/sessions/rotate", `{"operation_id":"op-rotate","expected_revision":2,"expected_generation":1,"actor_id":"owner","new_session_id":"session-2","handoff":{"scope":"agent/channel","current_task":"task-1","references":["thread-1"],"confirmed_facts":["tests pass"],"unresolved_items":["production"]}}`)
+	if rotated.Code != http.StatusCreated || !strings.Contains(rotated.Body.String(), `"current_session_generation":2`) || !strings.Contains(rotated.Body.String(), `"state":"retired"`) {
+		t.Fatalf("rotate=%d %s", rotated.Code, rotated.Body.String())
+	}
+	listed := call(http.MethodGet, "/v2/agents?workspace_id=workspace", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"lili"`) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
 	}
 }
 

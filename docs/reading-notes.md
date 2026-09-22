@@ -297,4 +297,11 @@ replace, directory sync, and read-back verification. The Agent-level Inbox now
 adds priority/coalescing, one active execution lease, independent read cursors
 and work marks, plus an atomic `read_seq` reply barrier with stale-draft
 recovery. Persistent Agent/Relationship, Session generations, Computers, and
-automation remain later layers rather than being implied by these stores.
+automation are separate layers rather than being implied by these stores.
+
+The next slice adds the first of those layers: Agent identity now survives
+Session replacement, Relationships are append-only revisions, and an Agent has
+one active Session generation. Rotation uses expected-version checks, retires
+the old generation with scope/tasks/references/facts/unresolved items, and
+opens a distinct Session ID. Computer binding and automated rotation policy
+remain separate concerns rather than being hidden inside Session storage.

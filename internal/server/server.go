@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/royal007a/01agent/internal/agentregistry"
 	"github.com/royal007a/01agent/internal/approvalstore"
 	"github.com/royal007a/01agent/internal/attention"
 	"github.com/royal007a/01agent/internal/engine"
@@ -47,6 +48,7 @@ type Config struct {
 	Tasks            *taskstore.Store
 	WorkItems        *workitem.Store
 	Attention        *attention.Store
+	Agents           *agentregistry.Store
 	Sessions         *sessionstore.Store
 	Approvals        *approvalstore.Store
 	ReadinessTTL     time.Duration
@@ -192,6 +194,11 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v2/inbox/{itemID}/fresh-replies", handler.authorize(handler.sendFreshReply))
 	handler.mux.HandleFunc("POST /v2/agents/{agentID}/work-marks", handler.authorize(handler.setAgentWorkMark))
 	handler.mux.HandleFunc("POST /v2/agents/{agentID}/work-marks/{conversationID}/clear", handler.authorize(handler.clearAgentWorkMark))
+	handler.mux.HandleFunc("POST /v2/agents", handler.authorize(handler.createPersistentAgent))
+	handler.mux.HandleFunc("GET /v2/agents", handler.authorize(handler.listPersistentAgents))
+	handler.mux.HandleFunc("GET /v2/agents/{agentID}", handler.authorize(handler.getPersistentAgent))
+	handler.mux.HandleFunc("POST /v2/agents/{agentID}/relationships/revisions", handler.authorize(handler.reviseAgentRelationships))
+	handler.mux.HandleFunc("POST /v2/agents/{agentID}/sessions/rotate", handler.authorize(handler.rotateAgentSession))
 	handler.mux.HandleFunc("GET /v1/approvals", handler.authorize(handler.listApprovals))
 	handler.mux.HandleFunc("GET /v1/approvals/{approvalID}", handler.authorize(handler.getApproval))
 	handler.mux.HandleFunc("POST /v1/approvals/{approvalID}/decision", handler.authorize(handler.decideApproval))
