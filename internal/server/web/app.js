@@ -10,11 +10,13 @@ const state = {
   bindings: {},
   commands: {},
   automations: [],
+  dispatches: [],
 };
 
 const titles = {
   overview: "系统总览",
   tasks: "交付任务",
+  dispatches: "Dispatcher",
   agents: "Agent 组织",
   computers: "执行节点",
   automations: "定时自动化",
@@ -113,6 +115,7 @@ async function loadControlPlane() {
     request("v2/agents"),
     request("v2/computers"),
     request("v2/automations"),
+    request("v2/dispatches"),
   ]);
   const unauthorized = results.find((result) => result.status === "rejected" && result.reason?.status === 401);
   if (unauthorized) throw unauthorized.reason;
@@ -124,6 +127,7 @@ async function loadControlPlane() {
     state.commands = results[2].value.body.commands || {};
   }
   if (results[3].status === "fulfilled") state.automations = results[3].value.body.automations || [];
+  if (results[4].status === "fulfilled") state.dispatches = results[4].value.body.executions || [];
   renderAll();
 }
 
@@ -153,6 +157,7 @@ function renderMetrics() {
     ["Persistent Agents", state.agents.length, `${state.agents.reduce((sum, item) => sum + (item.sessions?.length || 0), 0)} session generations`],
     ["Computers", Object.keys(state.computers).length, `${Object.values(state.computers).filter((item) => item.status === "online").length} online`],
     ["Automations", state.automations.length, `${state.automations.filter((item) => item.status === "active").length} active`],
+    ["Dispatches", state.dispatches.length, `${state.dispatches.filter((item) => !["succeeded", "failed", "canceled"].includes(item.phase)).length} active`],
   ];
   const root = $("#metric-grid");
   root.replaceChildren(...definitions.map(([label, value, foot]) => {
@@ -266,6 +271,61 @@ function renderAutomations() {
   }));
 }
 
+function renderDispatches() {
+  $("#dispatches-count").textContent = `${state.dispatches.length} runs`;
+  const root = $("#dispatches-table");
+  if (!state.dispatches.length) {
+    const row = element("tr"); const cell = element("td", "empty", state.token ? "暂无 Dispatcher 执行" : "请输入 Token"); cell.colSpan = 5; row.append(cell); root.replaceChildren(row); return;
+  }
+  root.replaceChildren(...state.dispatches.map((item) => {
+    const row = element("tr");
+    const identity = element("td", "primary-cell"); identity.append(element("strong", "", item.id), element("small", "", `task ${item.task_id}`));
+    const phase = element("td"); phase.append(badge(item.phase));
+    const actors = element("td", "primary-cell"); actors.append(element("strong", "", item.agent_id), element("small", "", `review: ${item.reviewer_id}`));
+    const attempts = element("td", "", `${item.attempt}/${item.max_attempts} · review ${item.review_attempt}`);
+    const actions = element("td", "row-actions");
+    if (item.phase === "awaiting_human") {
+      const pass = element("button", "mini-button success", "人工通过");
+      const reject = element("button", "mini-button danger", "退回");
+      pass.addEventListener("click", (event) => { event.stopPropagation(); decideHumanGate(item, "pass"); });
+      reject.addEventListener("click", (event) => { event.stopPropagation(); decideHumanGate(item, "reject"); });
+      actions.append(pass, reject);
+    }
+    if (!["succeeded", "failed", "canceled", "canceling"].includes(item.phase)) {
+      const cancel = element("button", "mini-button", "取消");
+      cancel.addEventListener("click", (event) => { event.stopPropagation(); cancelDispatch(item); });
+      actions.append(cancel);
+    }
+    if (!actions.childElementCount) actions.textContent = "—";
+    row.append(identity, phase, actors, attempts, actions);
+    row.addEventListener("click", () => showDetail(item.id, item));
+    return row;
+  }));
+}
+
+async function cancelDispatch(execution) {
+  const reason = window.prompt("取消原因", "用户取消")?.trim();
+  if (!reason) return;
+  try {
+    await request(`v2/dispatches/${encodeURIComponent(execution.id)}/cancel`, { method: "POST", body: JSON.stringify({ operation_id: `ui-cancel-${execution.id}-${Date.now()}`, reason }) });
+    showToast("已提交取消"); await loadControlPlane();
+  } catch (error) { showToast(`取消失败：${error.message}`); }
+}
+
+async function decideHumanGate(execution, decision) {
+  const task = state.tasks.find((item) => item.id === execution.task_id);
+  const latest = task?.submissions?.at(-1);
+  if (!task || !latest) { showToast("缺少 Task handoff，无法审核"); return; }
+  const reason = window.prompt(decision === "pass" ? "通过理由" : "退回理由", decision === "pass" ? "人工核验通过" : "人工核验未通过")?.trim();
+  if (!reason) return;
+  const body = { action: "review", operation_id: `ui-human-${decision}-${execution.id}-${Date.now()}`, expected_revision: task.revision, gate_result: { decision, reviewer_id: execution.reviewer_id, artifact_versions: latest.artifacts || [], evidence: ["manual gate decision from control plane"], reason } };
+  try {
+    await request(`v2/tasks/${encodeURIComponent(task.id)}/actions`, { method: "POST", body: JSON.stringify(body) });
+    await request("v2/dispatches/reconcile", { method: "POST" });
+    showToast(decision === "pass" ? "人工 Gate 已通过" : "已退回执行者"); await loadControlPlane();
+  } catch (error) { showToast(`Gate 操作失败：${error.message}`); }
+}
+
 function renderAll() {
   renderMetrics();
   renderTaskSummary();
@@ -275,6 +335,7 @@ function renderAll() {
   renderAgents();
   renderComputers();
   renderAutomations();
+  renderDispatches();
 }
 
 $("#token-form").addEventListener("submit", async (event) => {
@@ -303,6 +364,7 @@ $("#auth-button").addEventListener("click", () => {
   state.bindings = {};
   state.commands = {};
   state.automations = [];
+  state.dispatches = [];
   sessionStorage.removeItem("01agent_api_token");
   $("#auth-panel").classList.remove("connected");
   $("#auth-error").textContent = "";
@@ -312,6 +374,36 @@ $("#auth-button").addEventListener("click", () => {
 $("#detail-close").addEventListener("click", () => $("#detail-dialog").close());
 $$('[data-view]').forEach((item) => item.addEventListener("click", () => switchView(item.dataset.view)));
 $$('[data-go]').forEach((item) => item.addEventListener("click", () => switchView(item.dataset.go)));
+
+$("#task-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const id = String(form.get("id") || "").trim();
+  const payload = {
+    operation_id: `ui-create-${id}`, id, workspace_id: "default", channel_id: "control-plane",
+    parent_task_id: String(form.get("parent") || "").trim(), creator_id: "human", title: String(form.get("title") || "").trim(), objective: String(form.get("objective") || "").trim(),
+    requirements: [{ id: "R1", text: String(form.get("requirement") || "").trim() }], scope: { allow: [String(form.get("scope") || ".").trim()] }, stop_conditions: ["R1 verified"],
+    assignee_id: String(form.get("assignee") || "").trim(), gate: { kind: "agent", reviewer_id: String(form.get("reviewer") || "").trim(), checks: ["verify R1 against the artifact"], required_evidence: ["run artifact"], on_reject: "return to assignee" },
+  };
+  const status = $("#task-create-status"); status.textContent = "创建中…";
+  try { await request("v2/tasks", { method: "POST", body: JSON.stringify(payload) }); status.textContent = "已创建"; event.currentTarget.reset(); event.currentTarget.elements.scope.value = "."; await loadControlPlane(); }
+  catch (error) { status.textContent = error.message; }
+});
+
+$("#dispatch-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const id = String(form.get("id") || "").trim();
+  const payload = { operation_id: `ui-start-${id}`, id, task_id: String(form.get("task") || "").trim(), max_attempts: Number(form.get("attempts")), timeout_seconds: Number(form.get("timeout")) };
+  const status = $("#dispatch-create-status"); status.textContent = "启动中…";
+  try { await request("v2/dispatches", { method: "POST", body: JSON.stringify(payload) }); status.textContent = "已启动"; await loadControlPlane(); }
+  catch (error) { status.textContent = error.message; }
+});
+
+$("#reconcile-dispatches").addEventListener("click", async () => {
+  try { await request("v2/dispatches/reconcile", { method: "POST" }); showToast("已执行一次调度"); await loadControlPlane(); }
+  catch (error) { showToast(`调度失败：${error.message}`); }
+});
 
 $("#api-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -339,3 +431,4 @@ $("#api-form").addEventListener("submit", async (event) => {
 
 renderAll();
 refresh();
+setInterval(() => { if (state.token && !document.hidden) loadControlPlane().catch(() => {}); }, 5000);

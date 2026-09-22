@@ -16,6 +16,7 @@
       <nav aria-label="主导航">
         <button class="nav-item active" data-view="overview"><span>⌁</span>总览</button>
         <button class="nav-item" data-view="tasks"><span>◇</span>任务</button>
+        <button class="nav-item" data-view="dispatches"><span>▷</span>Dispatch</button>
         <button class="nav-item" data-view="agents"><span>◎</span>Agent</button>
         <button class="nav-item" data-view="computers"><span>▣</span>Computer</button>
         <button class="nav-item" data-view="automations"><span>↻</span>Automation</button>
@@ -76,7 +77,29 @@
         </section>
 
         <section class="view" id="view-tasks">
+          <article class="panel action-panel">
+            <div class="panel-head"><div><p class="eyebrow">NEW CONTRACT</p><h2>创建 Task v2</h2></div><span class="count-label">目标 / 范围 / Gate</span></div>
+            <form id="task-create-form" class="compact-form">
+              <input name="id" placeholder="Task ID" required><input name="title" placeholder="标题" required>
+              <input name="assignee" placeholder="执行 Agent ID" required><input name="reviewer" placeholder="独立 Reviewer Agent ID" required>
+              <input name="parent" placeholder="父 Task ID（可选）"><input name="objective" placeholder="目标" required>
+              <input name="requirement" placeholder="验收要求 R1" required><input name="scope" value="." placeholder="允许修改范围" required>
+              <button class="primary-button" type="submit">创建任务</button><span class="inline-status" id="task-create-status"></span>
+            </form>
+          </article>
           <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">TASK V2</p><h2>交付任务</h2></div><span class="count-label" id="tasks-count">0 items</span></div><div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>负责人</th><th>修订</th><th>更新时间</th></tr></thead><tbody id="tasks-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view" id="view-dispatches">
+          <article class="panel action-panel">
+            <div class="panel-head"><div><p class="eyebrow">RUN PROTOCOL</p><h2>启动 Dispatcher</h2></div><button class="text-button" id="reconcile-dispatches" type="button">立即调度 ↻</button></div>
+            <form id="dispatch-create-form" class="compact-form dispatch-form">
+              <input name="id" placeholder="Execution ID" required><input name="task" placeholder="Task ID" required>
+              <input name="attempts" type="number" min="1" max="10" value="3" aria-label="最大尝试"><input name="timeout" type="number" min="1" max="86280" value="600" aria-label="超时秒数">
+              <button class="primary-button" type="submit">启动执行</button><span class="inline-status" id="dispatch-create-status"></span>
+            </form>
+          </article>
+          <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">CANONICAL RUNS</p><h2>Dispatcher 执行</h2></div><span class="count-label" id="dispatches-count">0 runs</span></div><div class="table-wrap"><table><thead><tr><th>执行</th><th>阶段</th><th>执行 / 审核</th><th>尝试</th><th>操作</th></tr></thead><tbody id="dispatches-table"></tbody></table></div></article>
         </section>
 
         <section class="view" id="view-agents">

@@ -139,9 +139,10 @@ See [the architecture](docs/architecture.md) and
 make verify
 ```
 
-`make verify` formats-checks, vets, runs race-enabled tests, builds all eight
-binaries, and executes the 30-case deterministic runtime suite plus the
-15-case Task v2 state-machine suite. The runtime evaluator
+`make verify` formats-checks, vets, runs race-enabled tests, builds all nine
+binaries, and executes the 30-case deterministic runtime suite, the 15-case
+Task v2 state-machine suite, and the 15-case Dispatcher/Daemon end-to-end
+failure suite. The runtime evaluator
 records success rate, tool-sequence correctness, terminal reason, turns, token
 usage, latency, and estimated cost. Its report and per-case traces are written
 to `artifacts/eval/`; the configured 100% gate makes CI fail on any regression.
@@ -170,8 +171,10 @@ probe rather than reporting configuration presence as readiness. If model
 variables are missing or the probe fails, it and `/v1/runs` return `503`.
 
 `GET /` serves the built-in responsive control-plane console. It shows service
-status, Product Tasks, persistent Agents, Computers, and Automations, and
-includes a same-origin API console for the remaining operations. The HTML shell
+status, Product Tasks, persistent Agents, Computers, Automations, and
+Dispatcher Runs. Operators can create Tasks, start/cancel/reconcile Dispatches,
+and resolve human Gates without leaving the page; a same-origin API console
+covers lower-level operations. The HTML shell
 is public, while all control-plane data stays behind the existing bearer-token
 checks. The browser keeps the supplied token in `sessionStorage` only. All
 asset and API URLs are relative, so the console works both at `/` and behind a
@@ -279,6 +282,14 @@ successful move queues `cleanup_agent` for the old Computer. The Daemon removes
 only `<daemon-root>/agents/<agentID>` through a rename-to-trash step and reports
 `acked` or `failed`; cleanup failure is visible but never rolls back the new
 binding. Credentials and paths outside the Daemon-managed root are untouched.
+
+Dispatcher executions use `POST/GET /v2/dispatches`, explicit cancellation at
+`POST /v2/dispatches/{executionID}/cancel`, and the automatic scheduler (or
+manual `POST /v2/dispatches/reconcile`). The assigned Agent executes on its
+bound Computer; the Gate reviewer must be a different persistent Agent and
+reviews on its own bound Computer. Runtime results are committed to Task
+Artifacts/Handoffs before review. `AGENT_DISPATCH_RECONCILE_INTERVAL` controls
+the scheduler interval (one second by default).
 
 Agent self-evolution is gated. Candidate configuration revisions use
 `POST /v2/agents/{agentID}/revisions/candidates`; selection records compare the
