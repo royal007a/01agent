@@ -168,7 +168,7 @@ func TestWebConsoleIsPublicAndHardened(t *testing.T) {
 	}
 	asset := httptest.NewRecorder()
 	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/app.js", nil))
-	if asset.Code != http.StatusOK || asset.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(asset.Body.String(), "sessionStorage") {
+	if asset.Code != http.StatusOK || asset.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(asset.Body.String(), "sessionStorage") || !strings.Contains(asset.Body.String(), "v2/dispatches") || !strings.Contains(page.Body.String(), "dispatch-create-form") {
 		t.Fatalf("asset=%d headers=%v", asset.Code, asset.Header())
 	}
 	protected := httptest.NewRecorder()
