@@ -89,6 +89,78 @@ func (h *Handler) rotateAgentSession(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusCreated, map[string]any{"agent": agent})
 }
 
+func (h *Handler) proposeAgentRevision(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Agents == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "agent registry is not configured"})
+		return
+	}
+	var input agentregistry.AgentRevisionProposal
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	agent, err := h.config.Agents.ProposeAgentRevision(request.Context(), request.PathValue("agentID"), input)
+	if err != nil {
+		writeAgentRegistryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"agent": agent})
+}
+
+func (h *Handler) selectAgentRevision(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Agents == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "agent registry is not configured"})
+		return
+	}
+	var input agentregistry.SelectionInput
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	agent, err := h.config.Agents.SelectAgentRevision(request.Context(), request.PathValue("agentID"), input)
+	if err != nil {
+		writeAgentRegistryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"agent": agent})
+}
+
+func (h *Handler) createAgentRelationshipPR(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Agents == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "agent registry is not configured"})
+		return
+	}
+	var input agentregistry.RelationshipPRInput
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	agent, err := h.config.Agents.CreateRelationshipPR(request.Context(), request.PathValue("agentID"), input)
+	if err != nil {
+		writeAgentRegistryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"agent": agent})
+}
+
+func (h *Handler) reviewAgentRelationshipPR(writer http.ResponseWriter, request *http.Request) {
+	if h.config.Agents == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, errorResponse{Error: "agent registry is not configured"})
+		return
+	}
+	var input agentregistry.RelationshipPRReview
+	if err := decodeRequest(writer, request, &input); err != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	agent, err := h.config.Agents.ReviewRelationshipPR(request.Context(), request.PathValue("agentID"), request.PathValue("prID"), input)
+	if err != nil {
+		writeAgentRegistryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"agent": agent})
+}
+
 func writeAgentRegistryError(writer http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	switch {

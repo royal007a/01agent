@@ -313,3 +313,10 @@ Run lease or the target Computer is offline. After a successful move, cleanup
 of the old Daemon-owned Agent directory is a separate durable command with an
 acknowledged outcome; a cleanup failure stays visible without rewriting the
 new binding.
+
+The evolution layer follows the same rule: proposals do not silently become
+runtime state. Agent revisions require comparable evaluator evidence and a
+team-compatibility result; Relationship PRs are rejected when their base has
+changed. Automatic team selection filters on required skills, tools, and
+permissions before scoring delivery history and cost. Its output is an
+immutable Team Lockfile, so later upgrades affect only later selections.

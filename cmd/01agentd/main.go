@@ -30,6 +30,7 @@ import (
 	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/subagent"
 	"github.com/royal007a/01agent/internal/taskstore"
+	"github.com/royal007a/01agent/internal/team"
 	"github.com/royal007a/01agent/internal/tools"
 	"github.com/royal007a/01agent/internal/workitem"
 )
@@ -162,6 +163,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize computer store: %w", err)
 	}
+	teams, err := team.New(filepath.Join(store.Dir(), "teams"), agents)
+	if err != nil {
+		return fmt.Errorf("initialize team store: %w", err)
+	}
 	var compactor engine.ContextCompactor
 	if contextTokens := envInt("AGENT_CONTEXT_TOKENS", 0); contextTokens > 0 {
 		compactor = contextmanager.Window{MaxApproxTokens: contextTokens, ReserveTokens: contextTokens / 5, Archive: archive}
@@ -188,6 +193,7 @@ func run() error {
 		Attention:        attentionStore,
 		Agents:           agents,
 		Computers:        computers,
+		Teams:            teams,
 		Sessions:         sessions,
 		Approvals:        approvals,
 		ReadinessTTL:     envDuration("AGENT_READINESS_TTL", 5*time.Minute),

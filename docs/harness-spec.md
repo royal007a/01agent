@@ -117,6 +117,25 @@ the runtime and deterministic evaluator.
   exact Agent, be acknowledged, and remain inspectable on failure. Its failure
   MUST NOT roll back the completed binding.
 
+## Evolution and team lockfiles
+
+- A candidate Agent revision MUST NOT become active merely because it was
+  proposed. Selection MUST compare the current baseline and candidate under
+  the same evaluator suite, model, and token budget, and retain evidence.
+- Accepting a candidate MUST require non-regression and an explicit team
+  compatibility check. Rejected candidates and all selection records MUST
+  remain inspectable.
+- Relationship changes MAY enter through a PR. A PR MUST capture the observed
+  problem, proposed contract, team checks, and base Relationship revision; an
+  outdated base MUST prevent acceptance.
+- Automatic team selection MUST first satisfy required tools, permissions, and
+  skills, then use delivery evidence and cost within the declared budget. It
+  MUST fail rather than silently leave a role uncovered.
+- Every selected team MUST produce an immutable versioned Lockfile containing
+  exact Agent revision, Relationship revision, model, role, score, and cost.
+  Runs already bound to a Lockfile MUST NOT change when a member is upgraded or
+  rolled back.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator

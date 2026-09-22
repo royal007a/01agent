@@ -61,7 +61,7 @@ func (s *Store) Create(ctx context.Context, input CreateInput) (Agent, error) {
 		return Agent{}, err
 	}
 	now := s.now()
-	agentRevision := AgentRevision{ID: revisionID("agent", 1), Version: 1, PromptRef: input.PromptRef, Skills: append([]string(nil), input.Skills...), Model: input.Model, CreatedBy: input.CreatedBy, Reason: "initial", CreatedAt: now}
+	agentRevision := AgentRevision{ID: revisionID("agent", 1), Version: 1, PromptRef: input.PromptRef, Skills: append([]string(nil), input.Skills...), Tools: append([]string(nil), input.Tools...), Permissions: append([]string(nil), input.Permissions...), Model: input.Model, CreatedBy: input.CreatedBy, Reason: "initial", CreatedAt: now}
 	relationshipRevision := RelationshipRevision{ID: revisionID("relationship", 1), Version: 1, MyRole: input.MyRole, Teammates: cloneTeammates(input.Teammates), CreatedBy: input.CreatedBy, Reason: "initial", CreatedAt: now}
 	agent := Agent{
 		SchemaVersion: SchemaVersion, ID: input.ID, WorkspaceID: input.WorkspaceID, Name: input.Name, Revision: 1,
@@ -155,6 +155,123 @@ func (s *Store) RotateSession(ctx context.Context, agentID string, input Session
 		next := input.ExpectedGeneration + 1
 		agent.Sessions = append(agent.Sessions, SessionGeneration{Generation: next, SessionID: input.NewSessionID, State: SessionActive, CreatedAt: now})
 		agent.CurrentSessionGeneration = next
+		return nil
+	})
+}
+
+func (s *Store) ProposeAgentRevision(ctx context.Context, agentID string, input AgentRevisionProposal) (Agent, error) {
+	input.OperationID, input.ActorID = strings.TrimSpace(input.OperationID), strings.TrimSpace(input.ActorID)
+	input.PromptRef, input.Model, input.Reason = strings.TrimSpace(input.PromptRef), strings.TrimSpace(input.Model), strings.TrimSpace(input.Reason)
+	input.Skills = normalizeStrings(input.Skills)
+	input.Tools = normalizeStrings(input.Tools)
+	input.Permissions = normalizeStrings(input.Permissions)
+	return s.mutate(ctx, agentID, input.OperationID, "propose_agent_revision", input.ExpectedRevision, input, func(agent *Agent, now time.Time) error {
+		if !safeID.MatchString(input.ActorID) || input.PromptRef == "" || input.Model == "" || input.Reason == "" {
+			return errors.New("actor, prompt, model, and proposal reason are required")
+		}
+		version := int64(len(agent.AgentRevisions) + 1)
+		agent.AgentRevisions = append(agent.AgentRevisions, AgentRevision{
+			ID: revisionID("agent", version), Version: version, PromptRef: input.PromptRef,
+			Skills: append([]string(nil), input.Skills...), Tools: append([]string(nil), input.Tools...), Permissions: append([]string(nil), input.Permissions...), Model: input.Model, CreatedBy: input.ActorID, Reason: input.Reason, CreatedAt: now,
+		})
+		return nil
+	})
+}
+
+func (s *Store) SelectAgentRevision(ctx context.Context, agentID string, input SelectionInput) (Agent, error) {
+	input = normalizeSelection(input)
+	return s.mutate(ctx, agentID, input.OperationID, "select_agent_revision", input.ExpectedRevision, input, func(agent *Agent, now time.Time) error {
+		if !safeID.MatchString(input.ID) || !safeID.MatchString(input.SelectedBy) || input.SuiteID == "" || input.Model == "" || input.TokenBudget <= 0 || len(input.Evidence) == 0 || input.Reason == "" {
+			return errors.New("selection identity, evaluator conditions, evidence, and reason are required")
+		}
+		for _, selection := range agent.Selections {
+			if selection.ID == input.ID {
+				return ErrConflict
+			}
+		}
+		baseline, baselineFound := findAgentRevision(*agent, input.BaselineRevisionID)
+		candidate, candidateFound := findAgentRevision(*agent, input.CandidateRevisionID)
+		if !baselineFound || !candidateFound || baseline.ID != agent.CurrentAgentRevisionID || baseline.ID == candidate.ID {
+			return errors.New("selection must compare the current baseline with a distinct candidate")
+		}
+		if baseline.Model != input.Model || candidate.Model != input.Model {
+			return errors.New("baseline and candidate must be evaluated under the same model")
+		}
+		if input.Decision != SelectionAccept && input.Decision != SelectionReject {
+			return errors.New("selection decision must be accept or reject")
+		}
+		if input.Decision == SelectionAccept && (!input.TeamCompatible || input.CandidateScore < input.BaselineScore) {
+			return errors.New("candidate cannot be accepted without non-regression and team compatibility")
+		}
+		selection := AgentSelection{
+			ID: input.ID, BaselineRevisionID: input.BaselineRevisionID, CandidateRevisionID: input.CandidateRevisionID,
+			SuiteID: input.SuiteID, Model: input.Model, TokenBudget: input.TokenBudget,
+			BaselineScore: input.BaselineScore, CandidateScore: input.CandidateScore, TeamCompatible: input.TeamCompatible,
+			Evidence: append([]string(nil), input.Evidence...), Decision: input.Decision, Reason: input.Reason, SelectedBy: input.SelectedBy, CreatedAt: now,
+		}
+		agent.Selections = append(agent.Selections, selection)
+		if input.Decision == SelectionAccept {
+			agent.CurrentAgentRevisionID = candidate.ID
+		}
+		return nil
+	})
+}
+
+func (s *Store) CreateRelationshipPR(ctx context.Context, agentID string, input RelationshipPRInput) (Agent, error) {
+	input = normalizeRelationshipPR(input)
+	return s.mutate(ctx, agentID, input.OperationID, "create_relationship_pr", input.ExpectedRevision, input, func(agent *Agent, now time.Time) error {
+		if !safeID.MatchString(input.ID) || !safeID.MatchString(input.ActorID) || input.MyRole == "" || input.Problem == "" || len(input.TeamCheck) == 0 {
+			return errors.New("relationship PR identity, role, problem, and team check are required")
+		}
+		if err := validateTeammates(agent.ID, input.Teammates); err != nil {
+			return err
+		}
+		for _, proposal := range agent.RelationshipPRs {
+			if proposal.ID == input.ID {
+				return ErrConflict
+			}
+		}
+		agent.RelationshipPRs = append(agent.RelationshipPRs, RelationshipPR{
+			ID: input.ID, BaseRelationshipRevision: agent.CurrentRelationshipRevision, MyRole: input.MyRole,
+			Teammates: cloneTeammates(input.Teammates), Problem: input.Problem, TeamCheck: append([]string(nil), input.TeamCheck...),
+			State: ProposalOpen, CreatedBy: input.ActorID, CreatedAt: now,
+		})
+		return nil
+	})
+}
+
+func (s *Store) ReviewRelationshipPR(ctx context.Context, agentID, prID string, input RelationshipPRReview) (Agent, error) {
+	prID = strings.TrimSpace(prID)
+	input.OperationID, input.ReviewerID, input.Reason = strings.TrimSpace(input.OperationID), strings.TrimSpace(input.ReviewerID), strings.TrimSpace(input.Reason)
+	semantic := struct {
+		PR     string               `json:"pr"`
+		Review RelationshipPRReview `json:"review"`
+	}{prID, input}
+	return s.mutate(ctx, agentID, input.OperationID, "review_relationship_pr", input.ExpectedRevision, semantic, func(agent *Agent, now time.Time) error {
+		if !safeID.MatchString(prID) || !safeID.MatchString(input.ReviewerID) || input.Reason == "" || input.Decision != ProposalAccepted && input.Decision != ProposalRejected {
+			return errors.New("relationship PR review requires reviewer, accepted/rejected decision, and reason")
+		}
+		index := -1
+		for current := range agent.RelationshipPRs {
+			if agent.RelationshipPRs[current].ID == prID {
+				index = current
+				break
+			}
+		}
+		if index < 0 || agent.RelationshipPRs[index].State != ProposalOpen {
+			return errors.New("open relationship PR not found")
+		}
+		proposal := &agent.RelationshipPRs[index]
+		if proposal.BaseRelationshipRevision != agent.CurrentRelationshipRevision {
+			return fmt.Errorf("relationship baseline changed: %w", ErrConflict)
+		}
+		proposal.State, proposal.DecisionReason, proposal.ReviewedBy, proposal.ReviewedAt = input.Decision, input.Reason, input.ReviewerID, now
+		if input.Decision == ProposalAccepted {
+			version := int64(len(agent.RelationshipRevisions) + 1)
+			revision := RelationshipRevision{ID: revisionID("relationship", version), Version: version, MyRole: proposal.MyRole, Teammates: cloneTeammates(proposal.Teammates), CreatedBy: input.ReviewerID, Reason: "accepted PR " + proposal.ID + ": " + input.Reason, CreatedAt: now}
+			agent.RelationshipRevisions = append(agent.RelationshipRevisions, revision)
+			agent.CurrentRelationshipRevision = revision.ID
+		}
 		return nil
 	})
 }
@@ -274,8 +391,8 @@ func validateAgent(agent Agent) error {
 			return errors.New("invalid agent revision history")
 		}
 	}
-	if agent.CurrentAgentRevisionID != agent.AgentRevisions[len(agent.AgentRevisions)-1].ID {
-		return errors.New("current agent revision is not latest")
+	if _, found := findAgentRevision(agent, agent.CurrentAgentRevisionID); !found {
+		return errors.New("current agent revision is missing")
 	}
 	for index, revision := range agent.RelationshipRevisions {
 		if revision.Version != int64(index+1) || revision.ID != revisionID("relationship", revision.Version) || revision.MyRole == "" || !safeID.MatchString(revision.CreatedBy) || revision.Reason == "" || revision.CreatedAt.IsZero() || validateTeammates(agent.ID, revision.Teammates) != nil {
@@ -284,6 +401,35 @@ func validateAgent(agent Agent) error {
 	}
 	if agent.CurrentRelationshipRevision != agent.RelationshipRevisions[len(agent.RelationshipRevisions)-1].ID {
 		return errors.New("current relationship revision is not latest")
+	}
+	seenPRs := map[string]bool{}
+	for _, proposal := range agent.RelationshipPRs {
+		if !safeID.MatchString(proposal.ID) || seenPRs[proposal.ID] || proposal.BaseRelationshipRevision == "" || proposal.MyRole == "" || proposal.Problem == "" || len(proposal.TeamCheck) == 0 || !safeID.MatchString(proposal.CreatedBy) || proposal.CreatedAt.IsZero() || validateTeammates(agent.ID, proposal.Teammates) != nil {
+			return errors.New("invalid relationship PR history")
+		}
+		if proposal.State != ProposalOpen && proposal.State != ProposalAccepted && proposal.State != ProposalRejected {
+			return errors.New("invalid relationship PR state")
+		}
+		if proposal.State != ProposalOpen && (!safeID.MatchString(proposal.ReviewedBy) || proposal.DecisionReason == "" || proposal.ReviewedAt.IsZero()) {
+			return errors.New("reviewed relationship PR lacks decision metadata")
+		}
+		seenPRs[proposal.ID] = true
+	}
+	seenSelections := map[string]bool{}
+	for _, selection := range agent.Selections {
+		if !safeID.MatchString(selection.ID) || seenSelections[selection.ID] || selection.BaselineRevisionID == selection.CandidateRevisionID || selection.SuiteID == "" || selection.Model == "" || selection.TokenBudget <= 0 || len(selection.Evidence) == 0 || selection.Reason == "" || !safeID.MatchString(selection.SelectedBy) || selection.CreatedAt.IsZero() {
+			return errors.New("invalid agent selection history")
+		}
+		if selection.Decision != SelectionAccept && selection.Decision != SelectionReject {
+			return errors.New("invalid agent selection decision")
+		}
+		if _, found := findAgentRevision(agent, selection.BaselineRevisionID); !found {
+			return errors.New("selection baseline revision is missing")
+		}
+		if _, found := findAgentRevision(agent, selection.CandidateRevisionID); !found {
+			return errors.New("selection candidate revision is missing")
+		}
+		seenSelections[selection.ID] = true
 	}
 	active := 0
 	seenSessions := map[string]bool{}
@@ -352,6 +498,8 @@ func normalizeCreate(input CreateInput) CreateInput {
 	input.Name, input.CreatedBy, input.PromptRef = strings.TrimSpace(input.Name), strings.TrimSpace(input.CreatedBy), strings.TrimSpace(input.PromptRef)
 	input.Model, input.MyRole, input.SessionID = strings.TrimSpace(input.Model), strings.TrimSpace(input.MyRole), strings.TrimSpace(input.SessionID)
 	input.Skills = normalizeStrings(input.Skills)
+	input.Tools = normalizeStrings(input.Tools)
+	input.Permissions = normalizeStrings(input.Permissions)
 	input.Teammates = normalizeTeammates(input.Teammates)
 	return input
 }
@@ -367,6 +515,23 @@ func normalizeSessionRotation(input SessionRotation) SessionRotation {
 	input.Handoff = cloneHandoff(input.Handoff)
 	input.Handoff.Scope = strings.TrimSpace(input.Handoff.Scope)
 	input.Handoff.CurrentTask = strings.TrimSpace(input.Handoff.CurrentTask)
+	return input
+}
+
+func normalizeSelection(input SelectionInput) SelectionInput {
+	input.OperationID, input.ID = strings.TrimSpace(input.OperationID), strings.TrimSpace(input.ID)
+	input.BaselineRevisionID, input.CandidateRevisionID = strings.TrimSpace(input.BaselineRevisionID), strings.TrimSpace(input.CandidateRevisionID)
+	input.SuiteID, input.Model = strings.TrimSpace(input.SuiteID), strings.TrimSpace(input.Model)
+	input.Evidence = normalizeStrings(input.Evidence)
+	input.Reason, input.SelectedBy = strings.TrimSpace(input.Reason), strings.TrimSpace(input.SelectedBy)
+	return input
+}
+
+func normalizeRelationshipPR(input RelationshipPRInput) RelationshipPRInput {
+	input.OperationID, input.ID, input.ActorID = strings.TrimSpace(input.OperationID), strings.TrimSpace(input.ID), strings.TrimSpace(input.ActorID)
+	input.MyRole, input.Problem = strings.TrimSpace(input.MyRole), strings.TrimSpace(input.Problem)
+	input.Teammates = normalizeTeammates(input.Teammates)
+	input.TeamCheck = normalizeStrings(input.TeamCheck)
 	return input
 }
 
@@ -414,6 +579,15 @@ func cloneAgent(agent Agent) Agent {
 	var result Agent
 	_ = json.Unmarshal(encoded, &result)
 	return result
+}
+
+func findAgentRevision(agent Agent, id string) (AgentRevision, bool) {
+	for _, revision := range agent.AgentRevisions {
+		if revision.ID == id {
+			return revision, true
+		}
+	}
+	return AgentRevision{}, false
 }
 
 func revisionID(kind string, version int64) string { return fmt.Sprintf("%s-v%d", kind, version) }

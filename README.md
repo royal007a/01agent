@@ -47,6 +47,9 @@ lesson 13:
 - registered Computers with revisioned capability snapshots, outbound-only
   Daemon WebSockets, run-lease-safe Agent rebinding, and tracked old-device
   cleanup;
+- reviewable Relationship PRs, evaluator-backed Agent revision selection, and
+  capability/budget-aware automatic team selection that emits immutable Team
+  Lockfiles;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
 - a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
   both used as required CI gates;
@@ -266,6 +269,17 @@ successful move queues `cleanup_agent` for the old Computer. The Daemon removes
 only `<daemon-root>/agents/<agentID>` through a rename-to-trash step and reports
 `acked` or `failed`; cleanup failure is visible but never rolls back the new
 binding. Credentials and paths outside the Daemon-managed root are untouched.
+
+Agent self-evolution is gated. Candidate configuration revisions use
+`POST /v2/agents/{agentID}/revisions/candidates`; selection records compare the
+current baseline and candidate under the same suite, model, and token budget,
+and an accepted candidate must be non-regressing and team-compatible.
+Relationship changes may instead use reviewable PRs whose base revision must
+still be current when accepted. `POST /v2/teams/select` assigns template roles
+only to Agents satisfying required skills, tools, and permissions, incorporates
+delivery scores, enforces the model-cost budget, and writes exact Agent and
+Relationship revision IDs into a versioned Team Lockfile. Older Lockfiles stay
+unchanged when members evolve.
 
 ## Feishu bridge
 

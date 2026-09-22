@@ -130,6 +130,15 @@ an Agent queues cleanup on the old Computer; the Daemon renames the exact
 managed Agent directory into its private trash before removal, acknowledges
 success/failure, and never touches credentials or paths outside its root.
 
+Evolution stays inside the revision model. `agentregistry.Store` can retain a
+candidate without activating it, then append a selection record comparing the
+current baseline under identical suite/model/budget conditions. Relationship
+PRs similarly retain their problem, proposed contract, team checks, review,
+and base revision; a changed baseline makes acceptance stale. `team.Store`
+runs deterministic capability/budget matching and writes a versioned Team
+Lockfile with the exact Agent/Relationship revisions. It never resolves
+"current" dynamically for an already selected version.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit
