@@ -25,6 +25,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/01agent-eval ./cmd/01agent-eval
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
+    -ldflags "-s -w" \
+    -o /out/01agent-control-eval ./cmd/01agent-control-eval
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/01agent-replay ./cmd/01agent-replay
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -38,6 +42,7 @@ COPY --from=build /out/01agent /usr/local/bin/01agent
 COPY --from=build /out/01agentd /usr/local/bin/01agentd
 COPY --from=build /out/01agent-feishu /usr/local/bin/01agent-feishu
 COPY --from=build /out/01agent-eval /usr/local/bin/01agent-eval
+COPY --from=build /out/01agent-control-eval /usr/local/bin/01agent-control-eval
 COPY --from=build /out/01agent-replay /usr/local/bin/01agent-replay
 COPY --from=build /out/01agent-sandbox /usr/local/bin/01agent-sandbox
 COPY evals /workspace/evals

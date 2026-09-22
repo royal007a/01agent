@@ -285,3 +285,15 @@ to behave, so Bash is never included in the child registry.
 - [x] Soft repeat reminder before the deterministic hard stop
 - [x] Durable exact-call approval requests and decision API
 - [x] Bounded, read-only, recursion-free Subagent tool
+
+## Agent Team control-plane follow-up
+
+The first control-plane slice intentionally separates a product Task from the
+existing background execution Job. Task v2 now owns requirements, scope, stop
+conditions, atomic claim leases, immutable Artifact versions, structured
+Handoffs, parent/child completion, and evidence-bound Gate decisions. Canonical
+writes use operation identity, semantic fingerprints, revision CAS, atomic
+replace, directory sync, and read-back verification. The next dependency is an
+Agent-level Inbox with persistent work marks and a `read_seq` freshness barrier;
+persistent Agent/Relationship, Session generations, Computers, and automation
+remain later layers rather than being implied by Task v2.

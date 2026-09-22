@@ -1,0 +1,21 @@
+{
+  "name": "01agent-control-plane-v2",
+  "minimum_pass_rate": 1.0,
+  "cases": [
+    "create-contract-validation",
+    "create-idempotency",
+    "operation-semantic-conflict",
+    "revision-cas",
+    "exclusive-claim",
+    "expired-lease-reclaim",
+    "lease-renewal",
+    "contract-revision",
+    "artifact-immutability",
+    "handoff-artifact-binding",
+    "parent-child-barrier",
+    "closed-child-release",
+    "reviewer-authorization",
+    "rejection-rework",
+    "needs-human-then-pass"
+  ]
+}

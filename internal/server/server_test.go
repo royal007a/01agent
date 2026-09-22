@@ -21,6 +21,7 @@ import (
 	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
+	"github.com/royal007a/01agent/internal/workitem"
 )
 
 type testProvider struct {
@@ -274,6 +275,65 @@ func TestBackgroundTaskHTTPStateMachineDeliversTerminalOutput(t *testing.T) {
 	claim, err := inbox.Claim(context.Background(), "run-parent", "turn-parent", 10)
 	if err != nil || len(claim.Items) != 1 || claim.Items[0].Kind != engine.InputTask {
 		t.Fatalf("terminal output not delivered: claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestProductTaskV2HTTPDeliveryLifecycle(t *testing.T) {
+	workItems, err := workitem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{Token: "secret", WorkDir: t.TempDir(), Registry: tools.NewRegistry(), WorkItems: workItems})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	created := call(http.MethodPost, "/v2/tasks", `{
+		"operation_id":"op-create","id":"product-task","workspace_id":"workspace","channel_id":"channel",
+		"creator_id":"creator","title":"Ship","objective":"Deliver verified change",
+		"requirements":[{"id":"R1","text":"preserve behavior"}],"scope":{"allow":["internal/"]},
+		"stop_conditions":["tests pass"],"gate":{"kind":"agent","reviewer_id":"reviewer","checks":["R1"],"required_evidence":["tests"],"on_reject":"return"}
+	}`)
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"state":"todo"`) {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	claimed := call(http.MethodPost, "/v2/tasks/product-task/actions", `{"action":"claim","operation_id":"op-claim","expected_revision":1,"owner_id":"worker","lease_id":"lease-a","ttl_seconds":60}`)
+	if claimed.Code != http.StatusOK || !strings.Contains(claimed.Body.String(), `"state":"in_progress"`) {
+		t.Fatalf("claim=%d %s", claimed.Code, claimed.Body.String())
+	}
+	digest := strings.Repeat("a", 64)
+	artifact := call(http.MethodPost, "/v2/tasks/product-task/artifacts", `{"operation_id":"op-artifact","expected_revision":2,"owner_id":"worker","lease_id":"lease-a","id":"commit","version":"abc123","kind":"commit","uri":"git://abc123","digest":"`+digest+`"}`)
+	if artifact.Code != http.StatusCreated || !strings.Contains(artifact.Body.String(), `"version":"abc123"`) {
+		t.Fatalf("artifact=%d %s", artifact.Code, artifact.Body.String())
+	}
+	submitted := call(http.MethodPost, "/v2/tasks/product-task/actions", `{
+		"action":"submit","operation_id":"op-submit","expected_revision":3,"owner_id":"worker","lease_id":"lease-a",
+		"handoff":{"contract_revision":1,"author_id":"worker","summary":"done","evidence":["tests pass"],"artifacts":[{"id":"commit","version":"abc123","digest":"`+digest+`"}],"next_action":"review"}
+	}`)
+	if submitted.Code != http.StatusOK || !strings.Contains(submitted.Body.String(), `"state":"in_review"`) {
+		t.Fatalf("submit=%d %s", submitted.Code, submitted.Body.String())
+	}
+	reviewed := call(http.MethodPost, "/v2/tasks/product-task/actions", `{
+		"action":"review","operation_id":"op-review","expected_revision":4,
+		"gate_result":{"decision":"pass","reviewer_id":"reviewer","artifact_versions":[{"id":"commit","version":"abc123","digest":"`+digest+`"}],"evidence":["review passed"],"reason":"meets R1"}
+	}`)
+	if reviewed.Code != http.StatusOK || !strings.Contains(reviewed.Body.String(), `"state":"done"`) {
+		t.Fatalf("review=%d %s", reviewed.Code, reviewed.Body.String())
+	}
+	listed := call(http.MethodGet, "/v2/tasks?workspace_id=workspace&channel_id=channel", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"product-task"`) {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	loadedArtifact := call(http.MethodGet, "/v2/artifacts/commit/versions/abc123", "")
+	if loadedArtifact.Code != http.StatusOK || !strings.Contains(loadedArtifact.Body.String(), `"digest":"`+digest+`"`) {
+		t.Fatalf("get artifact=%d %s", loadedArtifact.Code, loadedArtifact.Body.String())
 	}
 }
 

@@ -94,6 +94,15 @@ claims are acknowledged and uncommitted claims are released for redelivery.
 terminal result is idempotently enqueued to its parent run, and is considered
 consumed only after the parent input claim has a committed revision.
 
+`workitem.Store` is a separate product delivery control plane; it does not
+reuse the execution Job state machine above. Its Task v2 records hold a
+versioned work contract, atomic claim lease, immutable Artifact references,
+structured Handoffs, parent/child completion barriers, and append-only Gate
+results. Each write is guarded by operation-ID semantic idempotency and
+revision CAS, atomically persisted, synced, and read back. The HTTP surface is
+namespaced under `/v2/tasks` so callers cannot confuse delivery responsibility
+with a background process.
+
 `spawn_subagent` creates a fresh bounded child query loop for complex read-only
 exploration. Its registry is rebuilt from an allowlist of `read` tools and never
 contains Bash, mutations, external actions, or itself. Child runs inherit
@@ -140,7 +149,7 @@ parse log messages.
 
 ## Evaluation gate
 
-`evals/runtime.json` contains 28 deterministic tasks covering direct answers,
+`evals/runtime.json` contains 30 deterministic tasks covering direct answers,
 single/paginated/parallel reads, recovery paths, loop and budget exits,
 thinking/action separation, compaction, write/edit, Bash, approval denial,
 canonical commits, queued user/task inputs, fuzzy edits, session continuity,
@@ -148,6 +157,12 @@ lazy Skills, archived recall, persistent Plan state, isolated Subagents, recover
 soft-before-hard repeat intervention, and durable approval creation.
 Each case writes and replays its real runtime trace before it is scored. The
 gate currently requires all cases to pass.
+
+`evals/control-plane.json` adds 15 deterministic Task v2 scenarios covering
+contract validation, operation idempotency, revision CAS, exclusive/expired
+leases, renewal, contract revision, Artifact immutability, Handoff binding,
+parent/child barriers, reviewer authorization, rejection/rework, and
+`needs_human` resolution. It also requires a 100% pass rate.
 
 The evaluator is a runtime conformance suite, not a claim about model quality.
 Its scripted provider makes regressions reproducible and cost-free. A live-model

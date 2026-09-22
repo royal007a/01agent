@@ -36,8 +36,11 @@ lesson 13:
 - durable claim/ack inputs for user steering, tool input, and child-task results;
 - a restart-safe background-task state machine with heartbeat, lost/reconcile,
   result delivery, and consumption acknowledgement;
+- a distinct product Task v2 control plane with revision-CAS claims, immutable
+  Artifacts, structured Handoffs, parent/child barriers, and evidence-bound Gates;
 - retry/backoff, rate-spacing, and concurrency control around model providers;
-- a 28-task deterministic evaluator used as a required CI gate;
+- a 30-case runtime evaluator plus a 15-case Task v2 state-machine evaluator,
+  both used as required CI gates;
 - a reproducible CLI, tests, container image, CI, and GHCR publishing.
 
 ## Quick start
@@ -122,8 +125,9 @@ See [the architecture](docs/architecture.md) and
 make verify
 ```
 
-`make verify` formats-checks, vets, runs race-enabled tests, builds all six
-binaries, and executes the 28-case deterministic runtime suite. The evaluator
+`make verify` formats-checks, vets, runs race-enabled tests, builds all seven
+binaries, and executes the 30-case deterministic runtime suite plus the
+15-case Task v2 state-machine suite. The runtime evaluator
 records success rate, tool-sequence correctness, terminal reason, turns, token
 usage, latency, and estimated cost. Its report and per-case traces are written
 to `artifacts/eval/`; the configured 100% gate makes CI fail on any regression.
@@ -213,6 +217,15 @@ Background workers use `POST /v1/tasks`, `GET /v1/tasks/{taskID}`, and
 `POST /v1/tasks/{taskID}/events`. Terminal task output is delivered to the
 parent run as a `task_result` input. The daemon reconciles stale heartbeats to
 `lost` and repairs delivery/consumption state after restart.
+
+Product delivery Tasks are deliberately separate from those execution Jobs.
+They use `POST/GET /v2/tasks`, `POST /v2/tasks/{taskID}/actions`, and
+`POST /v2/tasks/{taskID}/artifacts`. Every mutation carries an idempotent
+`operation_id` and `expected_revision`. A worker must hold the active claim
+lease to attach an immutable Artifact and submit a Handoff. The configured
+Gate checks the exact submitted Artifact versions; `pass`, `reject`, and
+`needs_human` transition to `done`, `in_progress`, and `in_review`
+respectively. Open child Tasks prevent their parent from entering review.
 
 ## Feishu bridge
 

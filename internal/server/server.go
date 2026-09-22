@@ -21,6 +21,7 @@ import (
 	"github.com/royal007a/01agent/internal/sessionstore"
 	"github.com/royal007a/01agent/internal/taskstore"
 	"github.com/royal007a/01agent/internal/tools"
+	"github.com/royal007a/01agent/internal/workitem"
 )
 
 const maxRequestBytes = 1 << 20
@@ -43,6 +44,7 @@ type Config struct {
 	InputQueue       engine.InputQueue
 	InputEnqueuer    engine.InputEnqueuer
 	Tasks            *taskstore.Store
+	WorkItems        *workitem.Store
 	Sessions         *sessionstore.Store
 	Approvals        *approvalstore.Store
 	ReadinessTTL     time.Duration
@@ -95,6 +97,23 @@ type taskEventRequest struct {
 	Failure string `json:"failure,omitempty"`
 }
 
+type workItemActionRequest struct {
+	Action           string                 `json:"action"`
+	OperationID      string                 `json:"operation_id"`
+	ExpectedRevision int64                  `json:"expected_revision"`
+	ActorID          string                 `json:"actor_id,omitempty"`
+	OwnerID          string                 `json:"owner_id,omitempty"`
+	LeaseID          string                 `json:"lease_id,omitempty"`
+	TTLSeconds       int64                  `json:"ttl_seconds,omitempty"`
+	Reason           string                 `json:"reason,omitempty"`
+	Requirements     []workitem.Requirement `json:"requirements,omitempty"`
+	Scope            workitem.Scope         `json:"scope,omitempty"`
+	StopConditions   []string               `json:"stop_conditions,omitempty"`
+	Gate             workitem.GateSpec      `json:"gate,omitempty"`
+	Handoff          workitem.Handoff       `json:"handoff,omitempty"`
+	GateResult       workitem.GateResult    `json:"gate_result,omitempty"`
+}
+
 type approvalDecisionRequest struct {
 	Decision approvalstore.State `json:"decision"`
 	Actor    string              `json:"actor,omitempty"`
@@ -142,6 +161,12 @@ func New(config Config) (*Handler, error) {
 	handler.mux.HandleFunc("POST /v1/tasks", handler.authorize(handler.createTask))
 	handler.mux.HandleFunc("GET /v1/tasks/{taskID}", handler.authorize(handler.getTask))
 	handler.mux.HandleFunc("POST /v1/tasks/{taskID}/events", handler.authorize(handler.taskEvent))
+	handler.mux.HandleFunc("POST /v2/tasks", handler.authorize(handler.createWorkItem))
+	handler.mux.HandleFunc("GET /v2/tasks", handler.authorize(handler.listWorkItems))
+	handler.mux.HandleFunc("GET /v2/tasks/{taskID}", handler.authorize(handler.getWorkItem))
+	handler.mux.HandleFunc("POST /v2/tasks/{taskID}/actions", handler.authorize(handler.workItemAction))
+	handler.mux.HandleFunc("POST /v2/tasks/{taskID}/artifacts", handler.authorize(handler.addWorkItemArtifact))
+	handler.mux.HandleFunc("GET /v2/artifacts/{artifactID}/versions/{version}", handler.authorize(handler.getWorkItemArtifact))
 	handler.mux.HandleFunc("GET /v1/approvals", handler.authorize(handler.listApprovals))
 	handler.mux.HandleFunc("GET /v1/approvals/{approvalID}", handler.authorize(handler.getApproval))
 	handler.mux.HandleFunc("POST /v1/approvals/{approvalID}/decision", handler.authorize(handler.decideApproval))

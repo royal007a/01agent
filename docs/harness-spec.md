@@ -40,6 +40,26 @@ the runtime and deterministic evaluator.
 - The parent MUST receive only the bounded child result and identifiers, not
   the child's full transcript.
 
+## Product tasks and delivery gates
+
+- Product Tasks MUST be distinct from runtime execution Jobs. A Task owns the
+  objective, versioned requirements, modification scope, stop conditions,
+  assignee, delivery state, and review contract.
+- Every Task mutation MUST carry an idempotent operation ID, a semantic
+  fingerprint, and an expected canonical revision. Reusing an operation ID
+  with different semantics or writing against a stale revision MUST fail.
+- Claiming MUST be atomic and lease-bound. Artifact attachment and submission
+  MUST revalidate the active owner and lease immediately before commit.
+- Artifacts MUST be immutable by `(artifact_id, version)` and content digest.
+  Handoffs MUST bind the current contract revision and enumerate the exact
+  Artifact versions and evidence submitted for review.
+- A parent MUST NOT enter review while a child is outside `done` or `closed`.
+- A Gate result MUST come from the configured reviewer and bind the exact
+  submitted Artifact versions. `pass`, `reject`, and `needs_human` MUST result
+  in `done`, `in_progress`, and `in_review` respectively; history is append-only.
+- Canonical Task and Artifact writes MUST be atomic, synced, and read back
+  before acknowledgement.
+
 ## Gate
 
 Every feature MUST have unit tests plus at least one deterministic evaluator
