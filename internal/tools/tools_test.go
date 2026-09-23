@@ -231,3 +231,36 @@ func TestFileToolsRejectSymlinkEscapeAllOps(t *testing.T) {
 		}
 	}
 }
+
+// 回归：codex review 第二轮 —— 解释器 stdin/heredoc 等绕过，改为白名单后一律拒绝。
+func TestReadOnlyGuardWhitelist(t *testing.T) {
+	wd := t.TempDir()
+	r := NewRegistry()
+	r.Register(NewBashTool(wd))
+	r.Use(ReadOnlyGuard())
+	run := func(cmd string) schema.ToolResult {
+		b, _ := json.Marshal(map[string]string{"command": cmd})
+		return r.Execute(context.Background(), schema.ToolCall{Name: "bash", Arguments: b})
+	}
+	for _, bad := range []string{
+		"python <<'PY'\nopen('pwned','w').write('x')\nPY",
+		"python3 - <<< \"open('pwned','w')\"", "echo \"open('pwned','w').write('x')\" | python3", "echo x | python3 -",
+		"lua -e 'io.open(\"pwned\",\"w\")'", "echo 'print 1' | perl -", "ruby pwn.rb", "node pwn.js", "osascript x",
+		"cat <(touch pwned)", "ls $(touch pwned)", "FOO=1 touch pwned", "git -c core.pager=touch log", "go run x.go",
+		"find . -fprint pwned", "vim -es pwned", "tar cf pwned .",
+	} {
+		if res := run(bad); !res.IsError {
+			t.Errorf("应拦截: %q", bad)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wd, "pwned")); err == nil {
+		t.Fatal("产生了写操作")
+	}
+	os.WriteFile(filepath.Join(wd, "a.go"), []byte("package a\n"), 0o644)
+	for _, good := range []string{"ls -la", "cat a.go | head -5", "grep -rn package . 2>/dev/null | wc -l", "find . -name '*.go' -type f",
+		"git status 2>&1 || true", "go version", "wc -l a.go && echo done"} {
+		if res := run(good); res.IsError && strings.Contains(res.Output, "只读") {
+			t.Errorf("只读命令被误拦: %q => %s", good, res.Output)
+		}
+	}
+}

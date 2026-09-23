@@ -78,6 +78,14 @@ Codex review（HEAD=6ec768c）共提出 5 个问题，均已修复，并补了�
 5. **P2 锁表无法回收。** 新增引用计数锁表 `internal/keylock`，引用计数归零即删除条目，HTTP 和飞书都改用它（1000 个不同 ID 用完后条目数为 0）。
    另外：`serve` 监听非回环地址且没有设置 `CLAW_HTTP_TOKEN` 时，直接拒绝启动。
 
+第二轮复核还发现 P1：只读守卫能被 `python <<'PY' ... PY` 这类 heredoc 或 stdin 解释器绕过。修复方式是把守卫从黑名单改为**白名单**：
+- 每个 `;`、`|`、`&&` 分段的首个命令都必须在只读白名单内；
+- git 只允许 log/show/diff/status 等只读子命令，go 只允许 version/env/list/doc；
+- find 禁止 -delete、-exec、-fprint；
+- 一律拒绝命令替换、进程替换、heredoc、`>` 重定向、变量赋值，以及带路径的命令名。
+
+回归测试 `TestReadOnlyGuardWhitelist` 覆盖 python heredoc/stdin、lua、perl -、ruby、node、vim、tar 等写法。真实模型重跑 L10、L13、L17 均 PASS，其中 L17 的子智能体在白名单下仍能完成探索。
+
 已知限制：`os.Root` 会拒绝使用绝对路径目标的符号链接，即使目标在工作区内；使用相对链接则正常。
 
 ## 6. 已知限制
