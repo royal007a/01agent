@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ import (
 // 第 10 讲：AGENTS.md + git-workflow Skill 约束下写 ping.go 并提交。
 func TestL10_AgentsMDAndSkills(t *testing.T) {
 	wd := workspace(t)
+	// 模型常会自行拉起 ping 服务做自测（nohup ... &），测试结束时清理掉，避免占用 8080
+	t.Cleanup(func() { exec.Command("pkill", "-f", `(/tmp/ping[-a-z]*|/exe/ping)$|go run ping\.go`).Run() })
 	write(t, filepath.Join(wd, "AGENTS.md"), "# 项目规范\n- 所有的 API 接口都必须返回 JSON 格式，且包含 `code` 和 `message` 字段。\n- 所有的错误处理，必须返回中文报错信息。\n")
 	write(t, filepath.Join(wd, ".claw/skills/git-workflow/SKILL.md"), "---\nname: git-workflow\ndescription: 当人类用户要求你“提交代码”、“保存变更”或执行 Git 相关操作时，必须使用此技能。\n---\n# 提交流程 SOP\n1. 先使用 `bash` 调用 `git status` 确认当前有哪些文件发生了改动。\n2. 你的 commit message 必须使用 Emoji 开头，例如：`🚀 feat: 增加新功能` 或 `🐛 fix: 修复 Bug`。\n3. 严禁使用 `git commit -am \"update\"` 这种敷衍的提交。\n")
 	sh(t, wd, "git init -q . && git add . && git -c user.name=t -c user.email=t@t commit -qm 'initial import'")

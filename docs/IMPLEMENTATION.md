@@ -50,7 +50,7 @@ Session.Append(assistant, observations, reminder?) <─────────�
 | 12 | Compaction | 超水位时：远期工具输出掩码（ToolCalls 保留）、远期推理折叠、保护区超长输出掐头去尾；只作用于请求，不改 Session | `context/compactor.go` |
 | 13 | 状态外部化 | Plan Mode 注入 PLAN.md/TODO.md 强制规范（嗅探→新建/续传→逐步打勾）；思考与行动合并为单条 assistant | `context/composer.go` |
 | 14 | 错误自愈 | 失败 Observation 按工具+特征匹配注入"[系统救援指南]" | `context/recovery.go` |
-| 15 | System Reminders | 规范化指纹 + 按会话滑动窗口统计，同一动作失败 ≥3 次注入 User 角色的强力提醒 | `engine/reminder.go` |
+| 15 | System Reminders | 规范化指纹 + 按会话滑动窗口统计，同一动作失败 ≥3 次注入 User 角色的强力提醒；提醒后仍原样重试则熔断该动作 | `engine/reminder.go` |
 | 16 | Middleware 与审批 | Registry.Use 中间件链；allow/ask/deny 策略（deny>ask>allow，`.claw/permissions.json` 热加载）；ask 时通过 ctx 找到当前 Reporter 走飞书/终端/HTTP 审批，无通道则 fail-closed | `tools/registry.go`, `permission/*`, `feishu/approval.go` |
 | 17 | Subagent | `spawn_subagent` 就是一个普通工具：`RunSub` 拉起上下文隔离的一次性子循环（≤10 轮），只拿只读注册表 + 只读 bash 守卫；多个子智能体可并行 | `tools/subagent.go`, `engine/subagent.go`, `tools/readonly_guard.go` |
 | 18 | 成本追踪 | `CostTracker` 装饰 Provider（按 ctx 中的会话记账）；`TimedRegistry` 装饰 Registry 记录工具本地耗时（思考题）；`/metrics` | `observability/tracker.go` |
@@ -110,6 +110,7 @@ make undeploy
 | 14 | CostTracker 构造时绑死一个 Session；注释写美元打印人民币 | 服务端所有人账单记到同一会话 | 从 ctx 取当前会话；统一人民币/百万 Token，可用 `CLAW_PRICE_IN/OUT` 覆盖 |
 | 15 | 子智能体只"不给 edit_file"，但 bash 能写文件；Reporter 构造时固定 | 爆炸半径没真正限制；飞书多会话进度发错群 | 只读 bash 守卫中间件；Reporter 从 ctx 取；超轮次返回阶段性发现 |
 | 16 | 飞书内容用 `TrimPrefix("{\"text\":\"")` 剥壳 | 换行/引号转义错乱，@ 占位符残留 | JSON 解析 + 去 `@_user_N`；忽略机器人消息；事件去重 |
+| 18 | 只有 Reminder，没有兜底 | 真机：用户要求"重试 5 次"时模型无视提醒继续重试 | 提醒后同一动作在本次唤醒内熔断（不再真实执行），另有 MaxTurns 硬预算 |
 | 17 | 第 16 讲飞书 bot 绑定单个 Session，`b.r` 在多协程间竞争 | 所有群共享一段记忆；审批消息发错群 | 每个 chat_id 一个 Session；Reporter 按运行透传 |
 
 ## 6. 验证记录
