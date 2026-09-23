@@ -27,7 +27,18 @@ var readOnlyCommands = map[string]bool{
 var (
 	gitReadOnly = map[string]bool{"log": true, "show": true, "diff": true, "status": true, "grep": true, "ls-files": true,
 		"blame": true, "rev-parse": true, "branch": true, "describe": true, "shortlog": true, "cat-file": true, "ls-tree": true}
-	goReadOnly     = map[string]bool{"version": true, "env": true, "list": true, "doc": true}
+	// go list 可能触发模块下载 / -toolexec，故不放行；go env 另禁 -w/-u（会改用户配置）
+	goReadOnly = map[string]bool{"version": true, "env": true, "doc": true}
+	// argSideEffects 白名单命令里"带参数就能写文件或执行程序"的选项（第二轮 codex review）。
+	argSideEffects = map[string]*regexp.Regexp{
+		"sort": regexp.MustCompile(`\s(-[a-zA-Z]*o|--output(=|\s|$)|--compress-program)`),
+		"git":  regexp.MustCompile(`\s(--output(=|\s|$)|-O\S*|--open-files-in-pager|--ext-diff|-c\s|--config-env|--exec-path)`),
+		"go":   regexp.MustCompile(`\s-(w|u)\b|\s-(toolexec|exec)\b`),
+		"tree": regexp.MustCompile(`\s-o\b`),
+		"file": regexp.MustCompile(`\s(-[a-zA-Z]*C|--compile)`),
+		"date": regexp.MustCompile(`\s(-s|--set)\b`),
+		"rg":   regexp.MustCompile(`\s--pre(=|\s|$)`),
+	}
 	findSideEffect = regexp.MustCompile(`\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b`)
 	// 命令替换、进程替换、heredoc/herestring 都能在"只读命令"里夹带任意执行
 	forbiddenSyntax = regexp.MustCompile("`|\\$\\(|<\\(|>\\(|<<")
@@ -55,10 +66,20 @@ func checkReadOnly(command string) string {
 		if !readOnlyCommands[name] {
 			return "命令 " + name + " 不在只读白名单中"
 		}
+		if re, ok := argSideEffects[name]; ok && re.MatchString(" "+strings.Join(fields[1:], " ")) {
+			return name + " 的该选项会写文件、改配置或执行外部程序"
+		}
 		switch name {
 		case "git":
 			if len(fields) < 2 || !gitReadOnly[fields[1]] {
 				return "只允许只读的 git 子命令（log/show/diff/status/grep…）"
+			}
+			if fields[1] == "branch" && len(positional(fields[2:])) > 0 {
+				return "git branch 只允许列出分支，不允许创建/删除"
+			}
+		case "uniq":
+			if len(positional(fields[1:])) > 1 {
+				return "uniq 的第二个文件参数会被当作输出文件"
 			}
 		case "go":
 			if len(fields) < 2 || !goReadOnly[fields[1]] {
@@ -71,6 +92,17 @@ func checkReadOnly(command string) string {
 		}
 	}
 	return ""
+}
+
+// positional 返回不以 - 开头的参数。
+func positional(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // ReadOnlyGuard 给子智能体的注册表用：bash 只允许白名单内的只读命令，其余一律拒绝。
