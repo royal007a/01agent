@@ -90,6 +90,10 @@ func buildClaudeMessages(msgs []schema.Message) (string, []anthropic.MessagePara
 			appendBlocks(anthropic.MessageParamRoleAssistant, blocks...)
 		}
 	}
+	// Anthropic 要求第一条消息必须是 user；Working Memory 截断后可能以 assistant 开头。
+	if len(out) > 0 && out[0].Role == anthropic.MessageParamRoleAssistant {
+		out = append([]anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("(以下是此前对话的延续)"))}, out...)
+	}
 	return system, out
 }
 

@@ -15,6 +15,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
 
@@ -70,6 +71,8 @@ type FeishuBot struct {
 	seen   map[string]struct{}
 	order  []string
 	wg     sync.WaitGroup
+	// Approvals 非空时，每个会话的 Reporter 都具备人工审批能力。
+	Approvals *permission.ApprovalManager
 }
 
 func NewFeishuBot(sender Sender, run RunFunc) *FeishuBot {
@@ -147,6 +150,7 @@ func (b *FeishuBot) handleAgentRun(chatID, prompt string) {
 	defer lock.Unlock()
 
 	reporter := NewFeishuReporter(b.sender, chatID)
+	reporter.approvals = b.Approvals
 	if err := b.run(context.Background(), chatID, prompt, reporter); err != nil {
 		reporter.Send(fmt.Sprintf("❌ Agent 运行崩溃: %v", err))
 	}

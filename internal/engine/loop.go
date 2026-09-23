@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
+	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
+	"github.com/weberzhao/go-tiny-claw/internal/runctx"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
@@ -27,76 +30,127 @@ const (
 )
 
 // AgentEngine 是微型 OS 的核心驱动。
+// 从第 11 讲开始，引擎本身无状态：记忆由 Session 承载，工作区跟随 Session。
 type AgentEngine struct {
 	provider provider.LLMProvider
 	registry tools.Registry
-	// WorkDir 工作区：Agent 必须有一个明确的物理边界
-	WorkDir string
 	// EnableThinking 慢思考模式开关（第 03 讲 Two-Stage ReAct）
 	EnableThinking bool
+	// PlanMode 计划模式开关（第 13 讲状态外部化）
+	PlanMode bool
+	// WorkingMemoryLimit 每轮从 Session 截取的最近消息条数（第 11 讲）
+	WorkingMemoryLimit int
+	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
+	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
+	MaxTurns  int
+	compactor *ctxpkg.Compactor
+	recovery  *ctxpkg.RecoveryManager
+	injector  *ReminderInjector
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
-	return &AgentEngine{provider: p, registry: r, WorkDir: workDir, EnableThinking: enableThinking}
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
+	return &AgentEngine{
+		provider:           p,
+		registry:           r,
+		EnableThinking:     enableThinking,
+		PlanMode:           planMode,
+		WorkingMemoryLimit: 20,
+		MaxTurns:           60,
+		compactor:          ctxpkg.NewCompactor(20000, 6),
+		recovery:           ctxpkg.NewRecoveryManager(),
+		injector:           NewReminderInjector(),
+	}
 }
 
-// Run 启动 Agent 的生命周期。
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
+// SetCompactor 替换默认的上下文压缩器。
+func (e *AgentEngine) SetCompactor(c *ctxpkg.Compactor) { e.compactor = c }
+
+// Chat 把一条用户指令压入 Session 并唤醒引擎。
+func (e *AgentEngine) Chat(ctx context.Context, session *ctxpkg.Session, prompt string, reporter Reporter) error {
+	session.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	return e.Run(ctx, session, reporter)
+}
+
+// Run 以 Session 为上下文载体驱动 ReAct 循环，直到模型不再请求工具。
+func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
 	if reporter == nil {
 		reporter = NopReporter{}
 	}
-	log.Printf("[Engine] 引擎启动，锁定工作区: %s", e.WorkDir)
-	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v", e.EnableThinking)
+	// 把当前会话与 Reporter 放进 ctx，供 Middleware（审批）/ Tracker（计费）等横切组件使用
+	ctx = runctx.WithReporter(runctx.WithSession(ctx, session), reporter)
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (Thinking: %v, PlanMode: %v)", session.ID, session.WorkDir, e.EnableThinking, e.PlanMode)
 
-	contextHistory := []schema.Message{
-		{Role: schema.RoleSystem, Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace."},
-		{Role: schema.RoleUser, Content: userPrompt},
-	}
+	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
+	systemMsg := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode).Build()
 
 	for turn := 1; ; turn++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if e.MaxTurns > 0 && turn > e.MaxTurns {
+			msg := fmt.Sprintf("⛔ 已达到单次任务的最大轮数 (%d)，为防止失控已强制停止。请检查进度后再下达更具体的指令。", e.MaxTurns)
+			reporter.OnMessage(ctx, msg)
+			return fmt.Errorf("超过最大轮数 %d", e.MaxTurns)
+		}
 		log.Printf("========== [Turn %d] 开始 ==========", turn)
 		availableTools := e.registry.GetAvailableTools()
 
-		// Phase 1: 慢思考 —— 剥夺工具，强制规划
+		// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
+		contextHistory := append([]schema.Message{systemMsg}, session.GetWorkingMemory(e.WorkingMemoryLimit)...)
+		compacted := e.compactor.Compact(contextHistory)
+
+		// 2. Phase 1: 慢思考 —— 剥夺工具，强制规划
+		var thinking string
 		if e.EnableThinking {
 			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
 			reporter.OnThinking(ctx)
-			thinkReq := append(append([]schema.Message{}, contextHistory...), schema.Message{Role: schema.RoleUser, Content: thinkingNudge})
+			thinkReq := append(append([]schema.Message{}, compacted...), schema.Message{Role: schema.RoleUser, Content: thinkingNudge})
 			thinkResp, err := e.provider.Generate(ctx, thinkReq, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
-				log.Printf("[Engine] 🧠 内部思考 Trace: %s", textutil.Truncate(thinkResp.Content, 300, "..."))
-				contextHistory = append(contextHistory, *thinkResp)
+				thinking = thinkResp.Content
+				log.Printf("[Engine] 🧠 内部思考 Trace: %s", textutil.Truncate(thinking, 300, "..."))
+				compacted = append(compacted,
+					schema.Message{Role: schema.RoleAssistant, Content: thinking},
+					schema.Message{Role: schema.RoleUser, Content: actionNudge})
 			}
 		}
 
-		// Phase 2: 行动 —— 恢复工具，顺着规划执行
+		// 3. Phase 2: 行动 —— 恢复工具，顺着规划执行
 		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
-		actionReq := contextHistory
-		if e.EnableThinking && contextHistory[len(contextHistory)-1].Role == schema.RoleAssistant {
-			actionReq = append(append([]schema.Message{}, contextHistory...), schema.Message{Role: schema.RoleUser, Content: actionNudge})
-		}
-		actionResp, err := e.provider.Generate(ctx, actionReq, availableTools)
+		actionResp, err := e.provider.Generate(ctx, compacted, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
-		contextHistory = append(contextHistory, *actionResp)
+		// 第 13/14 讲的 1214 修复：把思考与行动合并为一条合法的 Assistant 消息写入 Session，
+		// 避免出现连续两条 assistant、或 assistant(思考) 之后紧跟 tool 消息的非法序列。
+		final := *actionResp
+		if thinking != "" {
+			final.Content = strings.TrimSpace(thinking + "\n" + actionResp.Content)
+		}
+		session.Append(final)
 		if actionResp.Content != "" {
 			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
-		// 退出条件：模型没有请求任何工具调用
+		// 4. 退出条件：模型没有请求任何工具调用，挂起等待人类的下一条指令
 		if len(actionResp.ToolCalls) == 0 {
 			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
 			return nil
 		}
 
-		// 执行行动 (Action) 与获取观察结果 (Observation)：Fork-Join 并发执行（第 08 讲）
+		// 5. 执行行动并把 Observation 写入 Session
 		log.Printf("[Engine] 模型请求调用 %d 个工具...", len(actionResp.ToolCalls))
 		observations := e.executeTools(ctx, actionResp.ToolCalls, reporter)
-		contextHistory = append(contextHistory, observations...)
+		session.Append(observations...)
+
+		// 6. 死循环探测（第 15 讲）：必要时把严厉提醒作为最新的 User 消息追加到 Session 末尾
+		if reminder := e.injector.CheckAndInject(session.ID, actionResp.ToolCalls, observations); reminder != nil {
+			session.Append(*reminder)
+			reporter.OnMessage(ctx, "⚠️ 检测到重复失败，已注入 System Reminder 干预。")
+		}
 	}
 }
 
@@ -110,11 +164,20 @@ const MaxParallelTools = 5
 // 只要混入任何有副作用的工具（write/edit/bash），就退化为按顺序串行执行。
 // 两种路径都写入预分配切片的固定下标，天然保序、无需加锁。
 func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall, reporter Reporter) []schema.Message {
+	return e.executeToolsWith(ctx, e.registry, calls, reporter)
+}
+
+// executeToolsWith 使用指定注册表执行（子智能体用受限注册表）。
+func (e *AgentEngine) executeToolsWith(ctx context.Context, registry tools.Registry, calls []schema.ToolCall, reporter Reporter) []schema.Message {
 	observations := make([]schema.Message, len(calls))
 	run := func(idx int, call schema.ToolCall) {
 		log.Printf("  -> [Go-%d] 🛠️ 执行工具: %s, 参数: %s", idx, call.Name, textutil.Truncate(string(call.Arguments), 300, "..."))
 		reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
-		result := e.registry.Execute(ctx, call)
+		result := registry.Execute(ctx, call)
+		// 错误自愈（第 14 讲）：失败时由 RecoveryManager 诊断并注入"锦囊妙计"
+		if result.IsError {
+			result.Output = e.recovery.AnalyzeAndInject(call.Name, result.Output)
+		}
 		// 人类看到的是缩略版（防止飞书消息过长）；传给模型的 Observation 依然是完整数据
 		reporter.OnToolResult(ctx, call.Name, textutil.Truncate(result.Output, 200, "... (已截断)"), result.IsError)
 		if result.IsError {
@@ -132,7 +195,7 @@ func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall,
 
 	parallel := len(calls) > 1
 	for _, c := range calls {
-		if !e.registry.IsReadOnly(c.Name) {
+		if !registry.IsReadOnly(c.Name) {
 			parallel = false
 			break
 		}

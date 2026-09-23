@@ -2,18 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/feishu"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 )
 
 // serve 以飞书机器人服务端方式运行（第 09 讲）。
@@ -25,6 +30,7 @@ func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:48080", "HTTP 监听地址（webhook 与 /healthz）")
 	thinking := fs.Bool("thinking", false, "开启慢思考")
+	planMode := fs.Bool("plan", false, "开启 Plan Mode")
 	workDir := fs.String("workdir", "./workspace", "工作区目录")
 	fs.Parse(args)
 
@@ -32,16 +38,33 @@ func serve(args []string) {
 	if appID == "" || appSecret == "" {
 		log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
 	}
-	eng, _ := buildEngine(*workDir, *thinking)
+	a := buildEngine(*workDir, *thinking, *planMode)
+	// 每个飞书会话（chat_id）一个 Session，JSONL 持久化，重启后自动恢复（第 11 讲）
+	sessions := ctxpkg.NewSessionManager(filepath.Join(defaultStateDir(), "sessions"))
 
 	bot := feishu.NewFeishuBot(feishu.NewLarkSender(appID, appSecret),
 		func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
-			return eng.Run(ctx, prompt, r)
+			return a.eng.Chat(ctx, sessions.GetOrCreate("feishu_"+chatID, a.workDir), prompt, r)
 		})
+	// 第 16 讲：高危命令挂起 → 飞书审批 → 唤醒
+	bot.Approvals = permission.NewApprovalManager(10 * time.Minute)
+	bot.UseCommand(feishu.ApprovalCommand(bot.Approvals, bot.Sender()))
+	bot.UseCommand(func(ctx context.Context, chatID, text string) bool {
+		if text != "/reset" && text != "/new" {
+			return false
+		}
+		sessions.Reset("feishu_" + chatID)
+		_ = bot.Sender().SendText(ctx, chatID, "🧹 已清空本会话的记忆。")
+		return true
+	})
 	dispatcher := bot.EventDispatcher(os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(a.stats.Snapshot())
+	})
 	mux.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
 	go func() {
 		log.Printf("🚀 go-tiny-claw 服务端已启动，HTTP 监听 %s (/healthz, /webhook/event)", *addr)

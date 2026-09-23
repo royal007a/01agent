@@ -26,10 +26,16 @@ type ReadOnlyTool interface {
 	ReadOnly() bool
 }
 
+// MiddlewareFunc 在工具真正执行前拦截调用（第 16 讲）。
+// 返回 allowed=false 时底层 Execute 绝不会被触发，rejectReason 会作为错误回灌给模型。
+type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string)
+
 // Registry 定义了工具的注册与分发接口。
 type Registry interface {
 	// Register 挂载一个新的工具到系统中
 	Register(tool BaseTool)
+	// Use 挂载一个全局 Middleware，按挂载顺序依次执行
+	Use(mw MiddlewareFunc)
 	// GetAvailableTools 返回当前系统挂载的所有工具的 Schema
 	GetAvailableTools() []schema.ToolDefinition
 	// Execute 实际路由并执行模型请求的工具调用
@@ -43,7 +49,14 @@ type registryImpl struct {
 	tools map[string]BaseTool
 	// order 保持注册顺序：课程用 map 遍历导出 Schema，顺序随机，
 	// 会让每轮请求的 tools 字段抖动，破坏提示词缓存（prompt cache）。
-	order []string
+	order       []string
+	middlewares []MiddlewareFunc
+}
+
+func (r *registryImpl) Use(mw MiddlewareFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.middlewares = append(r.middlewares, mw)
 }
 
 func NewRegistry() Registry {
@@ -88,6 +101,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	// 1. 路由查找：找不到说明模型产生了幻觉，直接向模型抛出错误让它纠正
 	r.mu.RLock()
 	tool, exists := r.tools[call.Name]
+	mws := append([]MiddlewareFunc(nil), r.middlewares...)
 	r.mu.RUnlock()
 	if !exists {
 		return schema.ToolResult{
@@ -96,9 +110,20 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 			IsError:    true,
 		}
 	}
-	// 2. 执行工具逻辑：将原始 JSON 字节流直接丢给具体工具
+	// 2. 核心防御：执行前依次运行所有 Middleware，任何一个拒绝即拦截
+	for _, mw := range mws {
+		if allowed, reason := mw(ctx, call); !allowed {
+			log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s", call.Name, reason)
+			return schema.ToolResult{
+				ToolCallID: call.ID,
+				Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
+				IsError:    true, // 必须是 Error，强制大模型阅读拒绝理由
+			}
+		}
+	}
+	// 3. 执行工具逻辑：将原始 JSON 字节流直接丢给具体工具
 	output, err := tool.Execute(ctx, call.Arguments)
-	// 3. 封装结果
+	// 4. 封装结果
 	if err != nil {
 		return schema.ToolResult{
 			ToolCallID: call.ID,

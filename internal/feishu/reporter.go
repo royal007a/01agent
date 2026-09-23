@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
 
@@ -14,8 +15,9 @@ const maxFeishuText = 4000
 
 // FeishuReporter 将引擎的输出格式化后发给对应的飞书会话。
 type FeishuReporter struct {
-	sender Sender
-	chatID string
+	sender    Sender
+	chatID    string
+	approvals *permission.ApprovalManager
 }
 
 func NewFeishuReporter(sender Sender, chatID string) *FeishuReporter {
