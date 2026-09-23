@@ -23,6 +23,7 @@ deploy: install
 	mkdir -p $(HOME)/.go-tiny-claw/workspace $(HOME)/.go-tiny-claw/logs
 	sed -e "s#__BIN__#$(BIN)#g" -e "s#__REPO__#$(CURDIR)#g" -e "s#__HOME__#$(HOME)#g" deploy/launchd.plist.tmpl > $(PLIST)
 	-launchctl bootout gui/$$(id -u)/$(LABEL) 2>/dev/null
+	@for i in 1 2 3 4 5; do launchctl print gui/$$(id -u)/$(LABEL) >/dev/null 2>&1 || break; sleep 1; done
 	launchctl bootstrap gui/$$(id -u) $(PLIST)
 	@sleep 2; curl -fsS http://127.0.0.1:48080/healthz && echo "deployed: http://127.0.0.1:48080"
 
