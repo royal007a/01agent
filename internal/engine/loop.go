@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
@@ -87,22 +88,67 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 			return nil
 		}
 
-		// 执行行动 (Action) 与获取观察结果 (Observation)
+		// 执行行动 (Action) 与获取观察结果 (Observation)：Fork-Join 并发执行（第 08 讲）
 		log.Printf("[Engine] 模型请求调用 %d 个工具...", len(actionResp.ToolCalls))
-		for _, toolCall := range actionResp.ToolCalls {
-			log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s", toolCall.Name, string(toolCall.Arguments))
-			result := e.registry.Execute(ctx, toolCall)
-			if result.IsError {
-				log.Printf("  -> ❌ 工具执行报错: %s", result.Output)
-			} else {
-				log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)", len(result.Output))
-			}
-			contextHistory = append(contextHistory, schema.Message{
-				Role:       schema.RoleUser,
-				Content:    result.Output,
-				ToolCallID: toolCall.ID,
-				IsError:    result.IsError,
-			})
+		observations := e.executeTools(ctx, actionResp.ToolCalls)
+		contextHistory = append(contextHistory, observations...)
+	}
+}
+
+// MaxParallelTools 单轮最多同时运行的工具数（第 08 讲思考题：信号量限流）。
+const MaxParallelTools = 5
+
+// executeTools 执行一批工具调用，并按模型原始顺序返回 Observation。
+//
+// 课程采用"独立性假设"无脑并行；第 08 讲的思维实验同时指出了同一文件读写竞争的风险，
+// 并推荐"只读并发、涉写串行"。这里取两者之长：整批都是只读工具时并发（带信号量限流），
+// 只要混入任何有副作用的工具（write/edit/bash），就退化为按顺序串行执行。
+// 两种路径都写入预分配切片的固定下标，天然保序、无需加锁。
+func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall) []schema.Message {
+	observations := make([]schema.Message, len(calls))
+	run := func(idx int, call schema.ToolCall) {
+		log.Printf("  -> [Go-%d] 🛠️ 执行工具: %s, 参数: %s", idx, call.Name, string(call.Arguments))
+		result := e.registry.Execute(ctx, call)
+		if result.IsError {
+			log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s", idx, result.Output)
+		} else {
+			log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)", idx, len(result.Output))
+		}
+		observations[idx] = schema.Message{
+			Role:       schema.RoleUser,
+			Content:    result.Output,
+			ToolCallID: call.ID,
+			IsError:    result.IsError,
 		}
 	}
+
+	parallel := len(calls) > 1
+	for _, c := range calls {
+		if !e.registry.IsReadOnly(c.Name) {
+			parallel = false
+			break
+		}
+	}
+	if !parallel {
+		for i, c := range calls {
+			run(i, c)
+		}
+		return observations
+	}
+
+	log.Printf("[Engine] 本批 %d 个工具均为只读，Fork 并发执行", len(calls))
+	sem := make(chan struct{}, MaxParallelTools)
+	var wg sync.WaitGroup
+	for i, c := range calls {
+		wg.Add(1)
+		go func(idx int, call schema.ToolCall) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			run(idx, call)
+		}(i, c)
+	}
+	wg.Wait()
+	log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
+	return observations
 }

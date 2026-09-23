@@ -1,0 +1,143 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+
+	"github.com/weberzhao/go-tiny-claw/internal/schema"
+)
+
+func args(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+
+func TestFuzzyReplaceLevels(t *testing.T) {
+	src := "func main() {\n    // TODO: 增加鉴权逻辑\n    if true {\n        fmt.Println(\"No auth\")\n    }\n}\n"
+	// L1 精确
+	out, err := fuzzyReplace(src, "if true {", "if ok {")
+	if err != nil || !strings.Contains(out, "    if ok {") {
+		t.Fatalf("L1: %v %q", err, out)
+	}
+	// L2 CRLF
+	crlf := strings.ReplaceAll(src, "\n", "\r\n")
+	out, err = fuzzyReplace(crlf, "if true {\n        fmt", "if ok {\n        fmt")
+	if err != nil || !strings.Contains(out, "if ok {") {
+		t.Fatalf("L2: %v", err)
+	}
+	// L3 首尾空白
+	out, err = fuzzyReplace(src, "\n\n  fmt.Println(\"No auth\")  \n\n", "fmt.Println(\"Forbidden\")")
+	if err != nil || !strings.Contains(out, "        fmt.Println(\"Forbidden\")") {
+		t.Fatalf("L3: %v %q", err, out)
+	}
+	// L4 丢失缩进 + 自动补齐基础缩进（第 07 讲思考题）
+	old := "// TODO: 增加鉴权逻辑\nif true {\nfmt.Println(\"No auth\")\n}"
+	newT := "if user == nil {\n    fmt.Println(\"Forbidden!\")\n    return\n}"
+	out, err = fuzzyReplace(src, old, newT)
+	if err != nil {
+		t.Fatalf("L4: %v", err)
+	}
+	want := "func main() {\n    if user == nil {\n        fmt.Println(\"Forbidden!\")\n        return\n    }\n}\n"
+	if out != want {
+		t.Fatalf("L4 缩进对齐失败:\n%s\nwant:\n%s", out, want)
+	}
+	// 唯一性底线
+	dup := "a\n  x := 1\nb\n  x := 1\n"
+	if _, err := fuzzyReplace(dup, "x := 1", "y"); err == nil || !strings.Contains(err.Error(), errEditAmbiguous) {
+		t.Fatalf("多处匹配必须报错: %v", err)
+	}
+	if _, err := fuzzyReplace(dup, "x:=1\nzzz", "y"); err == nil || !strings.Contains(err.Error(), errEditNotFound) {
+		t.Fatalf("未找到必须报错: %v", err)
+	}
+}
+
+func TestPathBoundary(t *testing.T) {
+	wd := t.TempDir()
+	for _, bad := range []string{"../x", "/etc/passwd", "a/../../x"} {
+		if _, err := resolveInWorkDir(wd, bad); err == nil {
+			t.Fatalf("%s 应被拒绝", bad)
+		}
+	}
+	if p, err := resolveInWorkDir(wd, filepath.Join(wd, "a/b.txt")); err != nil || !strings.HasPrefix(p, wd) {
+		t.Fatalf("工作区内的绝对路径应允许: %v", err)
+	}
+}
+
+func TestFileTools(t *testing.T) {
+	wd := t.TempDir()
+	ctx := context.Background()
+	w, r, e := NewWriteFileTool(wd), NewReadFileTool(wd), NewEditFileTool(wd)
+	if _, err := w.Execute(ctx, args(map[string]string{"path": "d/a.go", "content": "x := 1\n"})); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := r.Execute(ctx, args(map[string]string{"path": "d/a.go"})); out != "x := 1\n" {
+		t.Fatal(out)
+	}
+	if _, err := e.Execute(ctx, args(map[string]string{"path": "d/a.go", "old_text": "x := 1", "new_text": "x := 2"})); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(wd, "d/a.go")); string(b) != "x := 2\n" {
+		t.Fatal(string(b))
+	}
+	if _, err := r.Execute(ctx, args(map[string]string{"path": "d"})); err == nil {
+		t.Fatal("读目录应报错")
+	}
+	big := strings.Repeat("中", 5000) // 15000 字节
+	os.WriteFile(filepath.Join(wd, "big.txt"), []byte(big), 0o644)
+	out, _ := r.Execute(ctx, args(map[string]string{"path": "big.txt"}))
+	if !utf8.ValidString(out) || !strings.Contains(out, "截断") || len(out) > ReadFileMaxBytes+300 {
+		t.Fatalf("大文件截断异常: len=%d", len(out))
+	}
+}
+
+func TestBashTool(t *testing.T) {
+	wd := t.TempDir()
+	b := NewBashTool(wd)
+	ctx := context.Background()
+	out, err := b.Execute(ctx, args(map[string]string{"command": "pwd"}))
+	if err != nil || !strings.Contains(out, filepath.Base(wd)) {
+		t.Fatalf("工作区绑定失败: %v %q", err, out)
+	}
+	if _, err := b.Execute(ctx, args(map[string]string{"command": "nosuchcmd_xyz"})); err == nil || !strings.Contains(err.Error(), "command not found") {
+		t.Fatalf("非零退出应返回 error（IsError=true）: %v", err)
+	}
+	b.Timeout = 500 * time.Millisecond
+	if _, err := b.Execute(ctx, args(map[string]string{"command": "sleep 5"})); err == nil || !strings.Contains(err.Error(), "超时") {
+		t.Fatalf("超时应被强杀: %v", err)
+	}
+	// 第 13 讲的坑：后台进程持有管道不能卡死 Main Loop
+	b.Timeout = 10 * time.Second
+	start := time.Now()
+	out, err = b.Execute(ctx, args(map[string]string{"command": "sleep 30 & echo started"}))
+	if err != nil || !strings.Contains(out, "started") || time.Since(start) > 5*time.Second {
+		t.Fatalf("后台进程导致阻塞: %v %q %v", err, out, time.Since(start))
+	}
+	out, _ = b.Execute(ctx, args(map[string]string{"command": "yes 错误日志 | head -c 30000"}))
+	if len(out) > BashMaxBytes+200 || !utf8.ValidString(out) {
+		t.Fatalf("输出截断异常 len=%d", len(out))
+	}
+}
+
+func TestRegistry(t *testing.T) {
+	r := NewRegistry()
+	wd := t.TempDir()
+	r.Register(NewReadFileTool(wd))
+	r.Register(NewWriteFileTool(wd))
+	r.Register(NewBashTool(wd))
+	for i := 0; i < 20; i++ {
+		defs := r.GetAvailableTools()
+		if defs[0].Name != "read_file" || defs[2].Name != "bash" {
+			t.Fatal("工具顺序必须稳定")
+		}
+	}
+	res := r.Execute(context.Background(), schema.ToolCall{ID: "1", Name: "nope"})
+	if !res.IsError || !strings.Contains(res.Output, "不存在") {
+		t.Fatal(res)
+	}
+	if !r.IsReadOnly("read_file") || r.IsReadOnly("bash") || r.IsReadOnly("nope") {
+		t.Fatal("只读判定错误")
+	}
+}

@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
+	"github.com/weberzhao/go-tiny-claw/internal/tools"
 )
 
 // scriptedProvider 模拟第 03 讲的升级版 Mock：tools 为空时是 Thinking，否则是 Action。
@@ -31,6 +34,9 @@ func (m *scriptedProvider) Generate(_ context.Context, msgs []schema.Message, to
 }
 
 type fakeRegistry struct{ calls []schema.ToolCall }
+
+func (f *fakeRegistry) Register(tools.BaseTool) {}
+func (f *fakeRegistry) IsReadOnly(string) bool  { return false }
 
 func (f *fakeRegistry) GetAvailableTools() []schema.ToolDefinition {
 	return []schema.ToolDefinition{{Name: "bash"}}
@@ -66,5 +72,47 @@ func TestTwoStageLoop(t *testing.T) {
 		if !found {
 			t.Fatalf("observation 未按 ToolCallID 回灌上下文")
 		}
+	}
+}
+
+// slowTool 用于验证并发与保序。
+type slowTool struct {
+	name     string
+	readOnly bool
+}
+
+func (s slowTool) Name() string                      { return s.name }
+func (s slowTool) ReadOnly() bool                    { return s.readOnly }
+func (s slowTool) Definition() schema.ToolDefinition { return schema.ToolDefinition{Name: s.name} }
+func (s slowTool) Execute(_ context.Context, a json.RawMessage) (string, error) {
+	time.Sleep(300 * time.Millisecond)
+	return "out:" + string(a), nil
+}
+
+func TestExecuteToolsParallelAndOrdered(t *testing.T) {
+	r := tools.NewRegistry()
+	r.Register(slowTool{"ro", true})
+	r.Register(slowTool{"rw", false})
+	e := NewAgentEngine(nil, r, t.TempDir(), false)
+	calls := []schema.ToolCall{
+		{ID: "a", Name: "ro", Arguments: []byte(`"1"`)},
+		{ID: "b", Name: "ro", Arguments: []byte(`"2"`)},
+		{ID: "c", Name: "ro", Arguments: []byte(`"3"`)},
+	}
+	start := time.Now()
+	obs := e.executeTools(context.Background(), calls)
+	if d := time.Since(start); d > 700*time.Millisecond {
+		t.Fatalf("只读批次应并发执行，耗时 %v", d)
+	}
+	for i, o := range obs {
+		if o.ToolCallID != calls[i].ID || o.Content != "out:"+string(calls[i].Arguments) {
+			t.Fatalf("结果顺序错乱: %#v", obs)
+		}
+	}
+	calls[1].Name = "rw"
+	start = time.Now()
+	e.executeTools(context.Background(), calls)
+	if d := time.Since(start); d < 850*time.Millisecond {
+		t.Fatalf("含写操作的批次应串行，耗时 %v", d)
 	}
 }
