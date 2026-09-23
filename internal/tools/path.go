@@ -7,56 +7,50 @@ import (
 	"strings"
 )
 
-// resolveInWorkDir 把模型给出的路径解析为工作区内的绝对路径。
+// workspace 以 os.Root 打开工作区，并把模型给出的路径换算成相对工作区的路径。
 //
-// 课程第 05 讲留了一个 TODO："生产环境中需要做路径穿越检测防范，防止 ../../etc/passwd"。
-// 这里补齐：相对路径以 workDir 为基准；绝对路径也允许，但都必须落在 workDir 之内。
+// 课程第 05 讲留了 TODO："生产环境中需要做路径穿越检测"。字符串层面的检查挡不住符号链接，
+// "先 EvalSymlinks 校验、再按字符串路径打开"又有 TOCTOU 竞态（校验后把目录换成指向外部的链接）。
+// os.Root 的每次操作都在内核层面相对工作区目录句柄解析路径，任何经 ".." 或符号链接逃逸都会失败，
+// 检查与打开是同一个原子操作。调用方用完需 Close。
 // （bash 工具按 YOLO 哲学不受此限制，文件工具则坚守工作区边界。）
-func resolveInWorkDir(workDir, p string) (string, error) {
+func workspace(workDir, p string) (*os.Root, string, error) {
 	if strings.TrimSpace(p) == "" {
-		return "", fmt.Errorf("path 参数不能为空")
+		return nil, "", fmt.Errorf("path 参数不能为空")
 	}
 	base, err := filepath.Abs(workDir)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	full := p
 	if !filepath.IsAbs(full) {
 		full = filepath.Join(base, p)
 	}
-	full = filepath.Clean(full)
-	if !within(base, full) {
-		return "", fmt.Errorf("路径 %q 越出了工作区边界 %s，已被拒绝", p, base)
-	}
-	// 文本层面在工作区内还不够：工作区里的符号链接可能指向外部。
-	// 解析"最深的已存在祖先"的真实路径，再拼回尚不存在的部分做二次校验。
-	realBase, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		realBase = base
-	}
-	existing, rest := full, ""
-	for {
-		if _, err := os.Lstat(existing); err == nil {
-			break
+	rel, err := filepath.Rel(base, filepath.Clean(full))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// 绝对路径也可能经 /var → /private/var 这类链接落在工作区内，再用真实路径比一次
+		if rb, e1 := filepath.EvalSymlinks(base); e1 == nil {
+			if rf, e2 := filepath.EvalSymlinks(filepath.Dir(full)); e2 == nil {
+				if r2, e3 := filepath.Rel(rb, filepath.Join(rf, filepath.Base(full))); e3 == nil && r2 != ".." && !strings.HasPrefix(r2, ".."+string(filepath.Separator)) {
+					rel, err = r2, nil
+				}
+			}
 		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			break
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, "", fmt.Errorf("路径 %q 越出了工作区边界 %s，已被拒绝", p, base)
 		}
-		rest = filepath.Join(filepath.Base(existing), rest)
-		existing = parent
 	}
-	realExisting, err := filepath.EvalSymlinks(existing)
+	root, err := os.OpenRoot(base)
 	if err != nil {
-		return "", fmt.Errorf("解析路径 %q 失败: %w", p, err)
+		return nil, "", fmt.Errorf("打开工作区失败: %w", err)
 	}
-	if !within(realBase, filepath.Join(realExisting, rest)) {
-		return "", fmt.Errorf("路径 %q 经符号链接解析后越出了工作区边界 %s，已被拒绝", p, base)
-	}
-	return full, nil
+	return root, rel, nil
 }
 
-func within(base, p string) bool {
-	rel, err := filepath.Rel(base, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+// wrapRootErr 把 os.Root 的逃逸错误翻译成 RecoveryManager 能识别的固定文案。
+func wrapRootErr(p string, err error) error {
+	if err != nil && strings.Contains(err.Error(), "path escapes from parent") {
+		return fmt.Errorf("路径 %q 经符号链接解析后越出了工作区边界，已被拒绝", p)
+	}
+	return err
 }

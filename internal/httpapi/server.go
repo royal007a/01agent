@@ -19,6 +19,7 @@ import (
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
@@ -75,7 +76,17 @@ type Server struct {
 	// Token 非空时要求 Authorization: Bearer <Token>
 	Token string
 
-	locks sync.Map // session -> *sync.Mutex
+	locks *keylock.Table // session -> 串行锁（引用计数回收，不会被海量 ID 撑爆）
+	once  sync.Once
+}
+
+func (s *Server) lockTable() *keylock.Table {
+	s.once.Do(func() {
+		if s.locks == nil {
+			s.locks = keylock.New()
+		}
+	})
+	return s.locks
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
@@ -125,10 +136,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if req.Session == "" {
 		req.Session = "default"
 	}
-	lockAny, _ := s.locks.LoadOrStore(req.Session, &sync.Mutex{})
-	lock := lockAny.(*sync.Mutex)
-	lock.Lock() // 同一会话串行，防止并发改同一工作区
-	defer lock.Unlock()
+	unlock := s.lockTable().Lock(req.Session) // 同一会话串行，防止并发改同一工作区
+	defer unlock()
 
 	sess := s.Sessions.GetOrCreate(sessionKey(req.Session), s.WorkDir)
 	rep := &collectReporter{session: req.Session, approvals: s.Approvals}
@@ -209,13 +218,12 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) reset(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	lockAny, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
-	lock := lockAny.(*sync.Mutex)
-	if !lock.TryLock() {
+	unlock, ok := s.lockTable().TryLock(id)
+	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "该会话有任务正在执行，稍后再重置"})
 		return
 	}
-	defer lock.Unlock()
+	defer unlock()
 	s.Sessions.Reset(sessionKey(id))
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "reset": true})
 }

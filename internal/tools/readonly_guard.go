@@ -19,6 +19,9 @@ var mutatingShell = regexp.MustCompile(strings.Join([]string{
 	`\bfind\b.*\s-(delete|exec|execdir|ok|fprint)\b`, `\bxargs\b`,
 	`\bgit\s+(commit|push|reset|checkout|clean|merge|rebase|add|stash|tag|apply|am|rm|mv|restore|switch|pull|fetch|config)\b`,
 	`\b(go|npm|pip[0-9]*|yarn|pnpm|cargo|make)\s`,
+	// 解释/转发入口：source、"."、exec、command、env、builtin 以及直接执行脚本都能间接跑任意写操作
+	`\b(source|exec|command|builtin|env|nice|nohup|timeout|xargs|awk|osascript)\b`,
+	`(^|[;&|(\x60]|\$\()\s*\.\s+\S`, `(^|[;&|(\x60]|\$\()\s*\.{0,2}/[^\s]*`, `\b(ba|z|da|k)?sh\s+[^-\s]`,
 }, "|"))
 
 // safeRedirect 只读命令里常见的无害重定向。

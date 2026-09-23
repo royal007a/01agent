@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
@@ -164,21 +163,25 @@ func (t *EditFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", fmt.Errorf("参数解析失败: %w", err)
 	}
-	fullPath, err := resolveInWorkDir(t.workDir, input.Path)
+	root, rel, err := workspace(t.workDir, input.Path)
 	if err != nil {
 		return "", err
 	}
-	contentBytes, err := os.ReadFile(fullPath)
+	defer root.Close()
+	info, err := root.Stat(rel)
 	if err != nil {
-		return "", fmt.Errorf("读取文件失败，请确认路径是否正确: %w", err)
+		return "", fmt.Errorf("读取文件失败，请确认路径是否正确: %w", wrapRootErr(input.Path, err))
+	}
+	contentBytes, err := root.ReadFile(rel)
+	if err != nil {
+		return "", fmt.Errorf("读取文件失败，请确认路径是否正确: %w", wrapRootErr(input.Path, err))
 	}
 	newContent, err := fuzzyReplace(string(contentBytes), input.OldText, input.NewText)
 	if err != nil {
 		return "", err
 	}
-	info, _ := os.Stat(fullPath)
-	if err := os.WriteFile(fullPath, []byte(newContent), info.Mode().Perm()); err != nil {
-		return "", fmt.Errorf("写回文件失败: %w", err)
+	if err := atomicWrite(root, rel, []byte(newContent), info.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("写回文件失败: %w", wrapRootErr(input.Path, err))
 	}
 	return fmt.Sprintf("✅ 成功修改文件: %s", input.Path), nil
 }

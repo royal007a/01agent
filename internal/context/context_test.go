@@ -171,3 +171,27 @@ func TestSessionFileNoCollision(t *testing.T) {
 		t.Fatalf("a/b 与 a_b 串了文件: %d", n)
 	}
 }
+
+// 回归：codex review —— 尾部半行 JSON 不应导致整段历史丢失。
+func TestSessionTruncatedTailRepair(t *testing.T) {
+	dir := t.TempDir()
+	m := NewSessionManager(dir)
+	s := m.GetOrCreate("s", "")
+	s.Append(schema.Message{Role: schema.RoleUser, Content: "1"}, schema.Message{Role: schema.RoleAssistant, Content: "2"})
+	f, _ := os.OpenFile(s.logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(`{"role":"user","cont`)
+	f.Close()
+
+	s2 := NewSessionManager(dir).GetOrCreate("s", "")
+	if s2.Len() != 2 {
+		t.Fatalf("应保留合法前缀，got %d", s2.Len())
+	}
+	s2.Append(schema.Message{Role: schema.RoleUser, Content: "3"})
+	if n := NewSessionManager(dir).GetOrCreate("s", "").Len(); n != 3 {
+		t.Fatalf("修复后应能继续追加并恢复，got %d", n)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, "*.corrupt-*"))
+	if len(backups) != 1 {
+		t.Fatal("原损坏文件应被隔离备份")
+	}
+}

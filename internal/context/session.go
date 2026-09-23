@@ -138,7 +138,19 @@ func (sm *SessionManager) GetOrCreate(id, workDir string) *Session {
 	if sm.persistDir != "" {
 		if err := os.MkdirAll(sm.persistDir, 0o755); err == nil {
 			sess.logPath = filepath.Join(sm.persistDir, fileNameFor(id))
-			if msgs, err := readJSONL(sess.logPath); err == nil && len(msgs) > 0 {
+			msgs, err := readJSONL(sess.logPath)
+			if err != nil && !os.IsNotExist(err) {
+				// 典型场景：进程在 Append 中途被杀，尾部留下半行 JSON。
+				// 保留已解析的合法前缀，把原文件隔离备份，再用合法前缀重写，而不是整段丢弃。
+				backup := fmt.Sprintf("%s.corrupt-%d", sess.logPath, time.Now().Unix())
+				if rerr := os.Rename(sess.logPath, backup); rerr == nil {
+					if werr := appendJSONL(sess.logPath, msgs); werr != nil {
+						log.Printf("[Session] 重写会话 %s 失败: %v", id, werr)
+					}
+				}
+				log.Printf("[Session] ⚠️ 会话 %s 的历史文件损坏（%v），已保留前 %d 条合法消息，原文件备份为 %s", id, err, len(msgs), backup)
+			}
+			if len(msgs) > 0 {
 				sess.history = msgs
 				log.Printf("[Session] 从磁盘恢复会话 %s：%d 条消息", id, len(msgs))
 			}

@@ -15,6 +15,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
@@ -65,7 +66,7 @@ type FeishuBot struct {
 	commands []CommandFunc
 
 	// chatLocks 让同一个会话的任务排队串行（第 09 讲思考题：防止多条指令并发改同一工作区）。
-	chatLocks sync.Map // chatID -> *sync.Mutex
+	chatLocks *keylock.Table
 	// seen 事件去重：飞书在回调超时时会重推同一条消息。
 	seenMu sync.Mutex
 	seen   map[string]struct{}
@@ -76,7 +77,7 @@ type FeishuBot struct {
 }
 
 func NewFeishuBot(sender Sender, run RunFunc) *FeishuBot {
-	return &FeishuBot{sender: sender, run: run, seen: make(map[string]struct{})}
+	return &FeishuBot{sender: sender, run: run, seen: make(map[string]struct{}), chatLocks: keylock.New()}
 }
 
 // UseCommand 注册一个口令拦截器。
@@ -142,24 +143,22 @@ func (b *FeishuBot) HandleMessage(ctx context.Context, messageID, chatID, text s
 
 // TryWithChatLock 在会话空闲时执行 fn（如 /reset），会话有任务在跑时返回 false。
 func (b *FeishuBot) TryWithChatLock(chatID string, fn func()) bool {
-	lockAny, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
-	lock := lockAny.(*sync.Mutex)
-	if !lock.TryLock() {
+	unlock, ok := b.chatLocks.TryLock(chatID)
+	if !ok {
 		return false
 	}
-	defer lock.Unlock()
+	defer unlock()
 	fn()
 	return true
 }
 
 func (b *FeishuBot) handleAgentRun(chatID, prompt string) {
-	lockAny, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
-	lock := lockAny.(*sync.Mutex)
-	if !lock.TryLock() {
+	unlock, ok := b.chatLocks.TryLock(chatID)
+	if !ok {
 		_ = b.sender.SendText(context.Background(), chatID, "⏳ 上一个任务还在执行，本条指令已排队。")
-		lock.Lock()
+		unlock = b.chatLocks.Lock(chatID)
 	}
-	defer lock.Unlock()
+	defer unlock()
 
 	reporter := NewFeishuReporter(b.sender, chatID)
 	reporter.approvals = b.Approvals

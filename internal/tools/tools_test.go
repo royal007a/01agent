@@ -57,12 +57,14 @@ func TestFuzzyReplaceLevels(t *testing.T) {
 func TestPathBoundary(t *testing.T) {
 	wd := t.TempDir()
 	for _, bad := range []string{"../x", "/etc/passwd", "a/../../x"} {
-		if _, err := resolveInWorkDir(wd, bad); err == nil {
+		if _, _, err := workspace(wd, bad); err == nil {
 			t.Fatalf("%s 应被拒绝", bad)
 		}
 	}
-	if p, err := resolveInWorkDir(wd, filepath.Join(wd, "a/b.txt")); err != nil || !strings.HasPrefix(p, wd) {
+	if r, p, err := workspace(wd, filepath.Join(wd, "a/b.txt")); err != nil || p != "a/b.txt" {
 		t.Fatalf("工作区内的绝对路径应允许: %v", err)
+	} else {
+		r.Close()
 	}
 }
 
@@ -181,5 +183,51 @@ func TestBashScrubsSecrets(t *testing.T) {
 	out, err := NewBashTool(t.TempDir()).Execute(context.Background(), args(map[string]string{"command": "env"}))
 	if err != nil || strings.Contains(out, "sk-secret") || strings.Contains(out, "CLAW_HTTP_TOKEN") || strings.Contains(out, "MY_PASSWORD") || !strings.Contains(out, "PATH=") {
 		t.Fatalf("环境变量未脱敏: %v", err)
+	}
+}
+
+// 回归：codex review —— source / . / 直接执行脚本 绕过只读守卫。
+func TestReadOnlyGuardIndirectExecution(t *testing.T) {
+	wd := t.TempDir()
+	os.WriteFile(filepath.Join(wd, "mutate.sh"), []byte("touch pwned\n"), 0o755)
+	r := NewRegistry()
+	r.Register(NewBashTool(wd))
+	r.Use(ReadOnlyGuard())
+	for _, cmd := range []string{"source ./mutate.sh", ". ./mutate.sh", "ls; . mutate.sh", "./mutate.sh", "bash mutate.sh", "sh mutate.sh",
+		"exec touch pwned", "command touch pwned", "env touch pwned", "awk 'BEGIN{system(\"touch pwned\")}'", "$(./mutate.sh)", "/bin/touch pwned"} {
+		b, _ := json.Marshal(map[string]string{"command": cmd})
+		if res := r.Execute(context.Background(), schema.ToolCall{Name: "bash", Arguments: b}); !res.IsError {
+			t.Errorf("应拦截: %s", cmd)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wd, "pwned")); err == nil {
+		t.Fatal("只读子智能体产生了写操作")
+	}
+}
+
+func TestFileToolsRejectSymlinkEscapeAllOps(t *testing.T) {
+	wd, outside := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0o644)
+	os.Symlink(outside, filepath.Join(wd, "link"))
+	os.Mkdir(filepath.Join(wd, "in"), 0o755)
+	os.Symlink("in", filepath.Join(wd, "inlink")) // 工作区内的相对链接
+	ctx := context.Background()
+	if _, err := NewReadFileTool(wd).Execute(ctx, args(map[string]string{"path": "link/secret.txt"})); err == nil || !strings.Contains(err.Error(), "越出了工作区边界") {
+		t.Fatalf("read 经链接逃逸应拒绝: %v", err)
+	}
+	if _, err := NewEditFileTool(wd).Execute(ctx, args(map[string]string{"path": "link/secret.txt", "old_text": "s", "new_text": "x"})); err == nil {
+		t.Fatal("edit 经链接逃逸应拒绝")
+	}
+	if _, err := NewWriteFileTool(wd).Execute(ctx, args(map[string]string{"path": "inlink/ok.txt", "content": "ok"})); err != nil {
+		t.Fatalf("指向工作区内部的链接应允许: %v", err)
+	}
+	if _, err := NewEditFileTool(wd).Execute(ctx, args(map[string]string{"path": "gone.txt", "old_text": "a", "new_text": "b"})); err == nil {
+		t.Fatal("编辑不存在的文件应返回错误而不是 panic")
+	}
+	ents, _ := os.ReadDir(filepath.Join(wd, "in"))
+	for _, e := range ents {
+		if strings.Contains(e.Name(), "claw-tmp") {
+			t.Fatal("原子写残留临时文件")
+		}
 	}
 }

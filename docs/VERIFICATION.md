@@ -67,7 +67,20 @@
 
 另外：飞书 `/reset` 改为只能在会话空闲时执行；只有"approve/reject + 6 位任务 ID"才会被当作审批口令。
 
-## 5. 已知限制
+## 5. Codex review 修复（第二轮）
+
+Codex review（HEAD=6ec768c）共提出 5 个问题，均已修复，并补了回归测试：
+
+1. **P1 Session 损坏会丢掉整段历史。** JSONL 尾部有半行时，以前会丢弃全部历史。现在保留合法前缀，把原文件备份为 `.corrupt-<ts>`，再用前缀重写（`TestSessionTruncatedTailRepair`）。
+2. **P1 只读守卫可被 `source` / `.` 绕过。** 现在一并拦截 `source`、`.`、`exec`、`command`、`env`、`awk`、直接执行 `./x` 或 `/abs/x`、`sh x`、`$(...)`（`TestReadOnlyGuardIndirectExecution`，工作区内不会出现 pwned 文件）。
+3. **P1 符号链接 TOCTOU。** 文件工具改用 Go `os.Root`，每次打开都相对工作区目录句柄做内核级解析，检查与打开合为一个原子操作；经链接逃逸的读、写、改都会失败（`TestFileToolsRejectSymlinkEscapeAllOps`）。
+4. **P1 edit 在并发删除时可能 panic。** 现在检查 `Stat` 的错误，写入改为"临时文件 + Rename"原子提交。
+5. **P2 锁表无法回收。** 新增引用计数锁表 `internal/keylock`，引用计数归零即删除条目，HTTP 和飞书都改用它（1000 个不同 ID 用完后条目数为 0）。
+   另外：`serve` 监听非回环地址且没有设置 `CLAW_HTTP_TOKEN` 时，直接拒绝启动。
+
+已知限制：`os.Root` 会拒绝使用绝对路径目标的符号链接，即使目标在工作区内；使用相对链接则正常。
+
+## 6. 已知限制
 
 - 权限规则基于正则，不理解 shell 引号：`grep -r 'rm -rf' docs` 也会触发审批，属于误报，没有漏放。
 - 审批只能防模型"犯错"，防不住同机上蓄意对抗的模型：YOLO 模式下的 bash 本来就能直接调用系统命令。真正的隔离需要沙箱或容器（课程第 16 讲的观点）。

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,12 @@ func serve(args []string) {
 	workDir := fs.String("workdir", filepath.Join(defaultStateDir(), "workspace"), "工作区目录")
 	fs.Parse(args)
 
+	// HTTP API 能驱动一个带 bash 的 Agent：监听非回环地址时必须设置 Token
+	if host, _, err := net.SplitHostPort(*addr); err != nil {
+		log.Fatalf("非法监听地址 %q: %v", *addr, err)
+	} else if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) && os.Getenv("CLAW_HTTP_TOKEN") == "" {
+		log.Fatalf("拒绝在非回环地址 %s 上无鉴权启动：请设置 CLAW_HTTP_TOKEN", *addr)
+	}
 	a := buildEngine(*workDir, *thinking, *planMode)
 	a.eng.MaxTurns = *maxTurns
 	// 每个入口会话一个 Session，JSONL 持久化，重启后自动恢复（第 11 讲）
