@@ -269,13 +269,15 @@ func TestReadOnlyGuardWhitelist(t *testing.T) {
 func TestReadOnlyGuardArgSideEffects(t *testing.T) {
 	for _, bad := range []string{"sort -o pwned /etc/hosts", "sort --output=pwned a", "sort -uo pwned a", "git diff --output=pwned",
 		"git log --output pwned", "git grep -Otouch x", "git -c core.pager=x log", "git branch newbranch", "git branch -D main",
+		"git branch --edit-description", "git branch --set-upstream-to=origin/main", "git branch --unset-upstream",
+		"git branch -m old new", "git branch -u origin/main", "git branch --track x",
 		"go env -w GOTOOLCHAIN=local", "go env -u GOFLAGS", "go list ./...", "tree -o pwned", "file -C -m magic",
 		"date -s 2020", "rg --pre ./x foo", "uniq a pwned"} {
 		if why := checkReadOnly(bad); why == "" {
 			t.Errorf("应拦截: %q", bad)
 		}
 	}
-	for _, good := range []string{"sort -u a.txt", "sort -n -r a | head", "git diff HEAD~1", "git log --oneline -5", "git branch -a",
+	for _, good := range []string{"sort -u a.txt", "sort -n -r a | head", "git diff HEAD~1", "git log --oneline -5", "git branch -a", "git branch", "git branch -vv --list",
 		"git branch --show-current", "go env GOPATH", "go version", "tree -L 2", "file a.go", "date +%F", "rg -n foo", "uniq -c a.txt"} {
 		if why := checkReadOnly(good); why != "" {
 			t.Errorf("误拦 %q: %s", good, why)

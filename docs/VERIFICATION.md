@@ -88,7 +88,7 @@ Codex review（HEAD=6ec768c）共提出 5 个问题，均已修复，并补了�
 
 第三轮复核又指出：白名单只检查了命令名，没检查参数的副作用，例如 `sort -o`、`git diff --output`、`go env -w`。现已补上参数级限制：
 - 禁止 sort 的 `-o`/`--output`；
-- 禁止 git 的 `--output`、`-O`、`--ext-diff`、`-c`；`git branch` 只允许列出分支；
+- 禁止 git 的 `--output`、`-O`、`--ext-diff`、`-c`；`git branch` 只放行纯列举选项（-a/-r/-v/--list/--show-current），拒绝 --edit-description/--set-upstream-to/--unset-upstream/-m/-u 等；
 - go 只放行 version/env/doc，并禁止 `-w`/`-u`；
 - 禁止 `tree -o`、`file -C`、`date -s`、`rg --pre`；
 - uniq 不允许带输出文件参数。

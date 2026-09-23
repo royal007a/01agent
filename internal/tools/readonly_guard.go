@@ -27,6 +27,8 @@ var readOnlyCommands = map[string]bool{
 var (
 	gitReadOnly = map[string]bool{"log": true, "show": true, "diff": true, "status": true, "grep": true, "ls-files": true,
 		"blame": true, "rev-parse": true, "branch": true, "describe": true, "shortlog": true, "cat-file": true, "ls-tree": true}
+	gitBranchListFlags = map[string]bool{"-a": true, "-r": true, "-v": true, "-vv": true, "-l": true, "--list": true,
+		"--all": true, "--remotes": true, "--verbose": true, "--show-current": true, "--no-color": true}
 	// go list 可能触发模块下载 / -toolexec，故不放行；go env 另禁 -w/-u（会改用户配置）
 	goReadOnly = map[string]bool{"version": true, "env": true, "doc": true}
 	// argSideEffects 白名单命令里"带参数就能写文件或执行程序"的选项（第二轮 codex review）。
@@ -74,8 +76,14 @@ func checkReadOnly(command string) string {
 			if len(fields) < 2 || !gitReadOnly[fields[1]] {
 				return "只允许只读的 git 子命令（log/show/diff/status/grep…）"
 			}
-			if fields[1] == "branch" && len(positional(fields[2:])) > 0 {
-				return "git branch 只允许列出分支，不允许创建/删除"
+			if fields[1] == "branch" {
+				// 只放行纯列举选项；--edit-description / --set-upstream-to / --unset-upstream / -m / -d
+				// 以及任何位置参数都会改仓库状态
+				for _, a := range fields[2:] {
+					if !gitBranchListFlags[a] {
+						return "git branch 只允许列出分支（-a/-r/-v/--list/--show-current），不允许 " + a
+					}
+				}
 			}
 		case "uniq":
 			if len(positional(fields[1:])) > 1 {
