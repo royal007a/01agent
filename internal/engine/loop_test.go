@@ -213,3 +213,41 @@ func TestSubagentIsolationAndReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// stubbornProvider 永远原样重试同一个失败的调用，直到看到熔断消息。
+type stubbornProvider struct{ calls int }
+
+func (p *stubbornProvider) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	last := msgs[len(msgs)-1]
+	if strings.Contains(last.Content, "Harness 熔断") {
+		return &schema.Message{Role: schema.RoleAssistant, Content: "放弃，需要人工帮助"}, nil
+	}
+	p.calls++
+	return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: fmt.Sprint("c", p.calls), Name: "read_file", Arguments: []byte(`{"path":"nope.txt"}`)}}}, nil
+}
+
+func TestDoomLoopBreaker(t *testing.T) {
+	wd := t.TempDir()
+	r := tools.NewRegistry()
+	r.Register(tools.NewReadFileTool(wd))
+	p := &stubbornProvider{}
+	sess := ctxpkg.NewSession("t", wd)
+	if err := NewAgentEngine(p, r, false, false).Chat(context.Background(), sess, "读 nope.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+	var reminders, executed int
+	for _, m := range sess.History() {
+		if !m.IsToolResult() && strings.Contains(m.Content, "SYSTEM REMINDER") {
+			reminders++
+		}
+		if m.IsToolResult() && !strings.Contains(m.Content, "Harness 熔断") {
+			executed++
+		}
+	}
+	if reminders != 1 || executed != 3 || p.calls != 4 {
+		t.Fatalf("reminders=%d executed=%d calls=%d", reminders, executed, p.calls)
+	}
+	if !strings.Contains(sess.History()[len(sess.History())-1].Content, "需要人工帮助") {
+		t.Fatal("熔断后模型应收手")
+	}
+}

@@ -50,4 +50,11 @@ func TestReminderSlidingWindowPerSession(t *testing.T) {
 	if r.CheckAndInject("s1", []schema.ToolCall{bad}, []schema.Message{fail("x")}) != nil {
 		t.Fatal("触发后应重新计数，避免每轮轰炸")
 	}
+	if !r.IsTripped("s1", call("read_file", `{"path": "secret.txt"}`)) || r.IsTripped("s2", bad) || r.IsTripped("s1", ls) {
+		t.Fatal("熔断应只作用于本会话的同一动作")
+	}
+	r.Forget("s1")
+	if r.IsTripped("s1", bad) {
+		t.Fatal("Forget 应解除熔断")
+	}
 }

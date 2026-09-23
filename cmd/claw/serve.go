@@ -34,10 +34,12 @@ func serve(args []string) {
 	addr := fs.String("addr", "127.0.0.1:48080", "HTTP 监听地址（/healthz /metrics /v1/* /webhook/event）")
 	thinking := fs.Bool("thinking", false, "开启慢思考")
 	planMode := fs.Bool("plan", false, "开启 Plan Mode")
+	maxTurns := fs.Int("max-turns", 60, "单次任务最大轮数（硬性兜底，0 为不限制）")
 	workDir := fs.String("workdir", filepath.Join(defaultStateDir(), "workspace"), "工作区目录")
 	fs.Parse(args)
 
 	a := buildEngine(*workDir, *thinking, *planMode)
+	a.eng.MaxTurns = *maxTurns
 	// 每个入口会话一个 Session，JSONL 持久化，重启后自动恢复（第 11 讲）
 	sessions := ctxpkg.NewSessionManager(filepath.Join(defaultStateDir(), "sessions"))
 	approvals := permission.NewApprovalManager(10 * time.Minute)

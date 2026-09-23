@@ -28,9 +28,12 @@ const reminderWindow = 12
 //     这里改为滑动窗口统计；
 //   - 指纹做参数规范化（第 15 讲思考题）：键排序、去首尾空白、路径 Clean，
 //     "/tmp/a.txt " 与 "./../tmp/a.txt" 这类微小变体会被识别为同一动作。
+//   - 提醒之后模型仍原样重试（实测：用户指令"重试 5 次"比提醒更有分量），
+//     就升级为熔断：同一动作在本次唤醒内不再真正执行，直接返回熔断错误。
 type ReminderInjector struct {
-	mu     sync.Mutex
-	window map[string][]outcome // sessionID -> 最近的工具结果
+	mu      sync.Mutex
+	window  map[string][]outcome       // sessionID -> 最近的工具结果
+	tripped map[string]map[string]bool // sessionID -> 已提醒过的动作指纹
 }
 
 type outcome struct {
@@ -39,7 +42,7 @@ type outcome struct {
 }
 
 func NewReminderInjector() *ReminderInjector {
-	return &ReminderInjector{window: make(map[string][]outcome)}
+	return &ReminderInjector{window: make(map[string][]outcome), tripped: make(map[string]map[string]bool)}
 }
 
 // Fingerprint 生成工具调用的规范化指纹。
@@ -113,6 +116,10 @@ func (r *ReminderInjector) CheckAndInject(sessionID string, calls []schema.ToolC
 		log.Printf("[Reminder] 监控到工具 %s 执行失败，该动作特征在最近窗口内失败次数: %d", c.Name, n)
 		if n >= DoomLoopThreshold {
 			trigger, count = &calls[i], n
+			if r.tripped[sessionID] == nil {
+				r.tripped[sessionID] = make(map[string]bool)
+			}
+			r.tripped[sessionID][fp] = true
 			// 触发后清掉该指纹的历史，避免每一轮都重复轰炸
 			kept := w[:0]
 			for _, o := range w {
@@ -141,9 +148,20 @@ func (r *ReminderInjector) CheckAndInject(sessionID string, calls []schema.ToolC
 	}
 }
 
-// Forget 清除某个会话的监控状态。
+// IsTripped 判断某个动作是否已在本会话中被熔断。
+func (r *ReminderInjector) IsTripped(sessionID string, call schema.ToolCall) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tripped[sessionID][Fingerprint(call.Name, call.Arguments)]
+}
+
+// Forget 清除某个会话的监控状态（每次新的唤醒开始时调用：人类给了新指令，给模型一次新机会）。
 func (r *ReminderInjector) Forget(sessionID string) {
 	r.mu.Lock()
 	delete(r.window, sessionID)
+	delete(r.tripped, sessionID)
 	r.mu.Unlock()
 }
+
+// breakerMessage 熔断后返回给模型的错误。
+const breakerMessage = "[Harness 熔断] 这个动作在本次任务中已经以相同参数反复失败，并且你已收到过 SYSTEM REMINDER，系统不会再执行它。请立即换一种完全不同的策略；如果无法继续，请直接结束并向用户说明需要什么人工帮助。"

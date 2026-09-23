@@ -80,6 +80,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	ctx = runctx.WithReporter(runctx.WithSession(ctx, session), reporter)
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (Thinking: %v, PlanMode: %v)", session.ID, session.WorkDir, e.EnableThinking, e.PlanMode)
 
+	e.injector.Forget(session.ID) // 新的人类指令，重置死循环监控与熔断状态
+
 	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
 	systemMsg := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode).Build()
 
@@ -173,7 +175,13 @@ func (e *AgentEngine) executeToolsWith(ctx context.Context, registry tools.Regis
 	run := func(idx int, call schema.ToolCall) {
 		log.Printf("  -> [Go-%d] 🛠️ 执行工具: %s, 参数: %s", idx, call.Name, textutil.Truncate(string(call.Arguments), 300, "..."))
 		reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
-		result := registry.Execute(ctx, call)
+		var result schema.ToolResult
+		if sess, _ := runctx.Session(ctx).(*ctxpkg.Session); sess != nil && e.injector.IsTripped(sess.ID, call) {
+			log.Printf("  -> [Go-%d] ⛔ 动作已被熔断，拒绝执行", idx)
+			result = schema.ToolResult{ToolCallID: call.ID, Output: breakerMessage, IsError: true}
+		} else {
+			result = registry.Execute(ctx, call)
+		}
 		// 错误自愈（第 14 讲）：失败时由 RecoveryManager 诊断并注入"锦囊妙计"
 		if result.IsError {
 			result.Output = e.recovery.AnalyzeAndInject(call.Name, result.Output)

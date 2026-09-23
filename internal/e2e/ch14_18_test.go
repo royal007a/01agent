@@ -59,11 +59,23 @@ func TestL15_DoomLoopReminder(t *testing.T) {
 		t.Fatalf("未触发 Reminder。调用轨迹:\n%s", rec.callsJoined())
 	}
 	n := strings.Count(rec.callsJoined(), "secret_key.txt")
-	t.Logf("read_file(secret_key.txt) 调用次数: %d；最终回复: %s", n, rec.lastMsg())
-	if n > 5 {
-		t.Fatalf("干预后模型仍在死磕: %d 次", n)
+	executed, blocked := 0, 0
+	for _, m := range sess.History() {
+		if m.IsToolResult() {
+			if strings.Contains(m.Content, "Harness 熔断") {
+				blocked++
+			} else {
+				executed++
+			}
+		}
+	}
+	t.Logf("模型发起 read_file(secret_key.txt) %d 次：真实执行 %d 次、被熔断 %d 次；最终回复: %s", n, executed, blocked, rec.lastMsg())
+	if executed > DoomLoopThresholdForTest {
+		t.Fatalf("提醒/熔断后同一失败动作仍被真实执行: %d 次", executed)
 	}
 }
+
+const DoomLoopThresholdForTest = 3
 
 // 第 16 讲：高危命令被 Middleware 拦截 → 人工拒绝 → 文件安然无恙；批准 → 真正执行。
 func TestL16_ApprovalMiddleware(t *testing.T) {

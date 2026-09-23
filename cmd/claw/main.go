@@ -93,11 +93,13 @@ func main() {
 	planMode := flag.Bool("plan", false, "开启 Plan Mode（PLAN.md/TODO.md 状态外部化）")
 	sessionID := flag.String("session", "", "会话 ID；设置后历史以 JSONL 持久化，可跨进程续聊")
 	yes := flag.Bool("yes", false, "自动批准高危操作（仅建议在沙箱中使用）")
+	maxTurns := flag.Int("max-turns", 60, "单次任务最大轮数（硬性兜底，0 为不限制）")
 	flag.Parse()
 	if *prompt == "" {
 		log.Fatal("用法: claw -prompt \"任务\" [-thinking] [-workdir dir] | claw serve")
 	}
 	a := buildEngine(*workDir, *thinking, *planMode)
+	a.eng.MaxTurns = *maxTurns
 	mgr := ctxpkg.GlobalSessionMgr
 	id := *sessionID
 	if id != "" {
