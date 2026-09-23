@@ -1,8 +1,9 @@
 # Reading notes: Agent Harness lessons 0-17
 
-These notes summarize the supplied course material through lesson 13. They
+These notes summarize the supplied course material through lesson 17. They
 turn the material into implementation requirements instead of copying the
-pedagogical examples verbatim.
+pedagogical examples verbatim. The numbered PDFs `05`–`18` in the local
+course directory correspond to lessons 04–17 below.
 
 ## 0. Opening: framework collapse and the Harness model
 
@@ -329,3 +330,44 @@ dispatch, and restart does not duplicate an already-created Task. Channel
 messages and Threads are intentionally not fabricated by this layer; adapters
 may add them while the Automation remains the source of timing and Task
 creation.
+
+## 5–18 PDF audit matrix
+
+This is the implementation review for the 14 supplied PDFs numbered 05
+through 18. A check mark means the requirement is implemented and has direct
+code/test evidence in the current worktree; it does not mean the system has
+the feature breadth of a mature production platform.
+
+| PDF | Requirement distilled | Current implementation | Evidence |
+| --- | --- | --- | --- |
+| 05 | Provider-neutral schema; OpenAI-compatible and Claude adapters; usage/error translation | Complete | `internal/provider/provider.go`, `openai.go`, `claude.go`; `internal/provider/provider_test.go` |
+| 06 | Registry exposes schemas, validates arguments, dispatches recoverable errors | Complete | `internal/tools/registry.go`; `internal/tools/registry_test.go` |
+| 07 | Minimal read/write/edit/bash primitives with workspace and sandbox boundaries | Complete with stricter safety than the lesson sample | `internal/tools/*`; `internal/sandbox/*`; `internal/tools/mutable_tools_test.go` |
+| 08 | Unique-only multi-level fuzzy Edit with stale-write protection | Complete | `internal/tools/mutable_files.go`; `internal/tools/mutable_tools_test.go` |
+| 09 | Parallel independent reads, ordered join, no unsafe concurrent mutation | Complete | `internal/tools/registry.go`; `TestRegistryRunsSafeBatchConcurrentlyAndPreservesOrder` |
+| 10 | Durable Feishu event intake, idempotency, restart reconciliation, session handoff | Complete | `internal/feishu/bridge.go`, `store.go`; `internal/feishu/bridge_test.go` |
+| 11 | Versioned AGENTS/Skills prompt composition and lazy skill disclosure | Complete | `internal/prompt/*`; `internal/prompt/composer_test.go` |
+| 12 | Physically isolated durable Sessions, serialized turns, restart-safe replay | Complete | `internal/sessionstore/*`; `internal/sessionstore/store_test.go` |
+| 13 | Tiered compaction while preserving canonical raw history and recall | Complete | `internal/contextmanager/*`, `internal/memory/*`; corresponding tests |
+| 14 | Externalized Plan/TODO state with Plan Mode and revision-CAS persistence | Complete | `internal/plan/*`; `TestPlanModeIsAnExplicitPromptCapability` |
+| 15 | Structured error codes plus context-aware recovery hints | Complete | `internal/engine/recovery.go`; `TestRunAddsStructuredRecoveryGuidanceAndTraceEvent` |
+| 16 | Soft System Reminder for repeated calls, backed by hard deterministic exits | Complete | `internal/engine/engine.go`; `TestRunStopsRepeatedEquivalentCall` and runtime evaluator |
+| 17 | Middleware-style exact-call approval, expiry, single-use, lease recheck | Complete | `internal/approvalstore/*`, `internal/tools/approval.go`; approval tests |
+| 18 | Bounded read-only Subagent with fresh context, lineage, cancellation, no recursion | Complete | `internal/subagent/*`; `TestSubagentHasFreshContextReadOnlyRegistryAndLineage` |
+
+Cross-cutting verification on 2026-09-23:
+
+- `make verify` passed: format check, `go vet`, race-enabled tests, all builds.
+- Runtime evaluator: 30/30, tool correctness 30/30, gate passed.
+- Control-plane evaluator: 15/15, gate passed.
+- Dispatcher/Daemon evaluator: 15/15, gate passed.
+- Real system test: two outbound WebSocket Daemons on separate Computers
+  completed a parent/child workflow with independent review and retry recovery.
+- Local service: `http://127.0.0.1:18080/`, `/healthz` returned `ok`, and
+  `/readyz` returned `ready` before the documentation-only review commit.
+
+Known audit boundary: the PDF examples are single-process teaching examples.
+01agent's implementation intentionally adds durable traces, revision checks,
+approval leases, sandbox checks, and restart semantics. Those additions are
+covered by the existing evaluator suites, but provider quality and real-world
+task success still require a separate benchmark against live models.
