@@ -48,15 +48,19 @@ type File struct {
 // DefaultRules 内置规则：课程 IsDangerousCommand 的黑名单 + 若干常见高危操作。
 // 注意课程的 `rm\s+-r` 抓不到 `rm -fr`，这里改为匹配任意包含 r/f 的选项组合。
 var DefaultRules = []Rule{
-	{Tool: "bash", Pattern: `\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+/(\s|"|$)`, Action: Deny}, // rm -rf /
-	{Tool: "bash", Pattern: `:\(\)\s*\{\s*:\|:&\s*\};:`, Action: Deny},                                  // fork bomb
-	{Tool: "bash", Pattern: `\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rRf]`, Action: Ask},
+	// rm 的任意选项组合（含 --recursive/--force 长选项）后以 / 或 /* 为目标
+	{Tool: "bash", Pattern: `\brm\s+((-[a-zA-Z]+|--[a-z-]+)\s+)*/\*?(\s|"|;|&|\||$)`, Action: Deny},
+	{Tool: "bash", Pattern: `:\(\)\s*\{\s*:\|:&\s*\};:`, Action: Deny}, // fork bomb
+	{Tool: "bash", Pattern: `\brm\s+((-[a-zA-Z]+|--[a-z-]+)\s+)*(-[a-zA-Z]*[rRf]|--recursive|--force)\b`, Action: Ask},
+	{Tool: "bash", Pattern: `\bfind\b.*\s-(delete|exec\s+rm)\b`, Action: Ask},
 	{Tool: "bash", Pattern: `\bsudo\b`, Action: Ask},
 	{Tool: "bash", Pattern: `(?i)\bdrop\s+(table|database|schema)\b`, Action: Ask},
-	{Tool: "bash", Pattern: `>\s*[^\s|&]*\.go\b`, Action: Ask}, // 恶意覆盖源代码
+	{Tool: "bash", Pattern: `(>|\btee\s+(-a\s+)?)\s*[^\s|&]*\.go\b`, Action: Ask}, // 覆盖源代码
 	{Tool: "bash", Pattern: `\bgit\s+(push|reset\s+--hard|clean\s+-[a-zA-Z]*f)`, Action: Ask},
 	{Tool: "bash", Pattern: `\b(kubectl\s+delete|mkfs|shutdown|reboot)\b|\bdd\s+if=`, Action: Ask},
 	{Tool: "bash", Pattern: `chmod\s+(-R\s+)?777`, Action: Ask},
+	{Tool: "bash", Pattern: `\|\s*(ba|z)?sh\b|\bbase64\s+(-d|--decode)`, Action: Ask}, // 管道执行/解码混淆
+	{Tool: "bash", Pattern: `/v1/approve|/v1/approvals`, Action: Deny},                // 禁止 Agent 自己审批自己
 }
 
 // Policy 带热加载能力的权限判定引擎。

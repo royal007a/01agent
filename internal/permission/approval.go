@@ -60,11 +60,20 @@ func (m *ApprovalManager) WaitWithSummary(ctx context.Context, taskID, scope, su
 	m.mu.Lock()
 	m.pending[taskID] = &pending{ch: ch, scope: scope, summary: summary, since: time.Now()}
 	m.mu.Unlock()
-	defer func() {
+	// finish 在锁内注销任务，并做最后一次非阻塞接收：
+	// 若 Resolve 已抢在超时/取消之前把结果放进了 channel，以人类的决定为准，
+	// 避免出现"人类看到已批准、实际却被自动拒绝"的不一致。
+	finish := func(fallback ApprovalResult) (bool, string) {
 		m.mu.Lock()
 		delete(m.pending, taskID)
 		m.mu.Unlock()
-	}()
+		select {
+		case r := <-ch:
+			return r.Allowed, r.Reason
+		default:
+			return fallback.Allowed, fallback.Reason
+		}
+	}
 
 	notify()
 	log.Printf("[Approval] 已发送审批请求 (TaskID: %s)，协程挂起等待...", taskID)
@@ -76,19 +85,22 @@ func (m *ApprovalManager) WaitWithSummary(ctx context.Context, taskID, scope, su
 	defer timer.Stop()
 	select {
 	case r := <-ch:
+		m.mu.Lock()
+		delete(m.pending, taskID)
+		m.mu.Unlock()
 		return r.Allowed, r.Reason
 	case <-timer.C:
-		return false, fmt.Sprintf("审批超时（%s 内无人响应），操作已自动拒绝。", timeout)
+		return finish(ApprovalResult{Reason: fmt.Sprintf("审批超时（%s 内无人响应），操作已自动拒绝。", timeout)})
 	case <-ctx.Done():
-		return false, "任务已取消，审批作废。"
+		return finish(ApprovalResult{Reason: "任务已取消，审批作废。"})
 	}
 }
 
 // Resolve 由人类回复触发。scope 不匹配时拒绝解锁，防止别的群随手批准。
 func (m *ApprovalManager) Resolve(taskID, scope string, allowed bool, reason string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock() // 持锁发送：与 Wait 的注销互斥，保证结果要么被消费、要么报"找不到"
 	p, ok := m.pending[taskID]
-	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("找不到待审批任务 %s，可能已超时或处理完毕", taskID)
 	}

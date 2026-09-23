@@ -61,7 +61,7 @@ func (r *collectReporter) OnMessage(_ context.Context, c string) {
 func (r *collectReporter) RequestApproval(ctx context.Context, req permission.ApprovalRequest) (bool, string) {
 	id := permission.NewTaskID()
 	summary := fmt.Sprintf("%s %s (规则 %s)", req.ToolName, textutil.Truncate(req.Args, 500, "..."), req.Rule)
-	return r.approvals.WaitWithSummary(ctx, id, r.session, summary, func() {
+	return r.approvals.WaitWithSummary(ctx, id, approvalScope(r.session), summary, func() {
 		r.add(Event{Type: "approval", Tool: req.ToolName, Content: "等待审批 task_id=" + id + " : " + summary})
 	})
 }
@@ -83,6 +83,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/approvals", s.auth(s.listApprovals))
 	mux.HandleFunc("POST /v1/approve", s.auth(s.approve))
 	mux.HandleFunc("GET /v1/sessions/{id}", s.auth(s.session))
+	mux.HandleFunc("POST /v1/sessions/{id}/reset", s.auth(s.reset))
 }
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
@@ -108,6 +109,9 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func sessionKey(id string) string { return "http_" + id }
+
+// approvalScope 给 HTTP 会话的审批加命名空间，避免通过 HTTP 冒充飞书 chat_id 审批别的渠道的任务。
+func approvalScope(session string) string { return "http:" + session }
 
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -158,7 +162,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Approvals.List(r.URL.Query().Get("session")))
+	session := r.URL.Query().Get("session")
+	if session == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "需要 ?session=<会话名>"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Approvals.List(approvalScope(session)))
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +191,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 			reason = "人类管理员通过 HTTP 拒绝了该操作，请换一种更安全的方式，或向用户说明原因。"
 		}
 	}
-	if err := s.Approvals.Resolve(req.TaskID, req.Session, req.Approve, reason); err != nil {
+	if err := s.Approvals.Resolve(req.TaskID, approvalScope(req.Session), req.Approve, reason); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
@@ -196,4 +205,17 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		"id": r.PathValue("id"), "messages": sess.Len(), "history": sess.History(),
 		"usage": map[string]any{"prompt_tokens": p, "completion_tokens": c, "cost_cny": cost},
 	})
+}
+
+func (s *Server) reset(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	lockAny, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	if !lock.TryLock() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "该会话有任务正在执行，稍后再重置"})
+		return
+	}
+	defer lock.Unlock()
+	s.Sessions.Reset(sessionKey(id))
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "reset": true})
 }

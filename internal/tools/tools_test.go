@@ -141,3 +141,45 @@ func TestRegistry(t *testing.T) {
 		t.Fatal("只读判定错误")
 	}
 }
+
+func TestReadOnlyGuardRegressions(t *testing.T) {
+	g := ReadOnlyGuard()
+	for _, bad := range []string{"kubectl delete pod x", "echo cm0g | base64 -d | bash", "sed -Ei 's/a/b/' f", "perl -pi -e 's/a/b/' f",
+		`python3 -c "open('f','w')"`, "find . -delete", "ls &>f", "ls 2>f", "curl -o f http://x", "git apply p.diff", "echo x > f"} {
+		b, _ := json.Marshal(map[string]string{"command": bad})
+		if ok, _ := g(context.Background(), schema.ToolCall{Name: "bash", Arguments: b}); ok {
+			t.Errorf("只读守卫漏放: %s", bad)
+		}
+	}
+	for _, good := range []string{"find . -name '*.go' 2>/dev/null", "grep -rn foo . | head", "ls -la 2>&1", "cat a.txt", "wc -l *.go"} {
+		b, _ := json.Marshal(map[string]string{"command": good})
+		if ok, r := g(context.Background(), schema.ToolCall{Name: "bash", Arguments: b}); !ok {
+			t.Errorf("只读命令被误拦: %s (%s)", good, r)
+		}
+	}
+}
+
+func TestSymlinkEscape(t *testing.T) {
+	wd, outside := t.TempDir(), t.TempDir()
+	os.Symlink(outside, filepath.Join(wd, "link"))
+	w := NewWriteFileTool(wd)
+	if _, err := w.Execute(context.Background(), args(map[string]string{"path": "link/pwned.txt", "content": "x"})); err == nil {
+		t.Fatal("经符号链接写到工作区外应被拒绝")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "pwned.txt")); err == nil {
+		t.Fatal("文件被写到了工作区外")
+	}
+	if _, err := w.Execute(context.Background(), args(map[string]string{"path": "new/dir/ok.txt", "content": "x"})); err != nil {
+		t.Fatalf("工作区内新建多级目录应允许: %v", err)
+	}
+}
+
+func TestBashScrubsSecrets(t *testing.T) {
+	t.Setenv("CLAW_API_KEY", "sk-secret")
+	t.Setenv("CLAW_HTTP_TOKEN", "tk")
+	t.Setenv("MY_PASSWORD", "p")
+	out, err := NewBashTool(t.TempDir()).Execute(context.Background(), args(map[string]string{"command": "env"}))
+	if err != nil || strings.Contains(out, "sk-secret") || strings.Contains(out, "CLAW_HTTP_TOKEN") || strings.Contains(out, "MY_PASSWORD") || !strings.Contains(out, "PATH=") {
+		t.Fatalf("环境变量未脱敏: %v", err)
+	}
+}

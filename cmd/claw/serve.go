@@ -69,8 +69,11 @@ func serve(args []string) {
 			if text != "/reset" && text != "/new" {
 				return false
 			}
-			sessions.Reset("feishu_" + chatID)
-			_ = bot.Sender().SendText(ctx, chatID, "🧹 已清空本会话的记忆。")
+			if bot.TryWithChatLock(chatID, func() { sessions.Reset("feishu_" + chatID) }) {
+				_ = bot.Sender().SendText(ctx, chatID, "🧹 已清空本会话的记忆。")
+			} else {
+				_ = bot.Sender().SendText(ctx, chatID, "⏳ 本会话有任务正在执行，请结束后再 /reset。")
+			}
 			return true
 		})
 		dispatcher := bot.EventDispatcher(os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY"))

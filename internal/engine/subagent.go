@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/runctx"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
@@ -35,6 +36,16 @@ func (p prefixReporter) OnToolCall(ctx context.Context, name, args string) {
 func (p prefixReporter) OnToolResult(ctx context.Context, name, result string, isErr bool) {
 	p.Reporter.OnToolResult(ctx, p.prefix+name, result, isErr)
 }
+
+// RequestApproval 子智能体触发的高危操作同样交给父 Reporter 的审批通道（若有）。
+func (p prefixReporter) RequestApproval(ctx context.Context, req permission.ApprovalRequest) (bool, string) {
+	if a, ok := p.Reporter.(permission.Approver); ok {
+		req.ToolName = p.prefix + req.ToolName
+		return a.RequestApproval(ctx, req)
+	}
+	return false, "子智能体没有可用的审批通道，高危操作已拒绝。"
+}
+
 func (p prefixReporter) OnThinking(context.Context)        {}
 func (p prefixReporter) OnMessage(context.Context, string) {} // 子智能体的汇报只交给主 Agent
 

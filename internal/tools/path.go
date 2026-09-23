@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -24,9 +25,38 @@ func resolveInWorkDir(workDir, p string) (string, error) {
 		full = filepath.Join(base, p)
 	}
 	full = filepath.Clean(full)
-	rel, err := filepath.Rel(base, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !within(base, full) {
 		return "", fmt.Errorf("路径 %q 越出了工作区边界 %s，已被拒绝", p, base)
 	}
+	// 文本层面在工作区内还不够：工作区里的符号链接可能指向外部。
+	// 解析"最深的已存在祖先"的真实路径，再拼回尚不存在的部分做二次校验。
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		realBase = base
+	}
+	existing, rest := full, ""
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		rest = filepath.Join(filepath.Base(existing), rest)
+		existing = parent
+	}
+	realExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("解析路径 %q 失败: %w", p, err)
+	}
+	if !within(realBase, filepath.Join(realExisting, rest)) {
+		return "", fmt.Errorf("路径 %q 经符号链接解析后越出了工作区边界 %s，已被拒绝", p, base)
+	}
 	return full, nil
+}
+
+func within(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

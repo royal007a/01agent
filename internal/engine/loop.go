@@ -98,7 +98,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		availableTools := e.registry.GetAvailableTools()
 
 		// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
-		contextHistory := append([]schema.Message{systemMsg}, session.GetWorkingMemory(e.WorkingMemoryLimit)...)
+		// RepairToolPairs：会话若在工具执行中途被重启，历史里会残留"有调用没结果"，补齐后才能合法发送
+		contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemory(e.WorkingMemoryLimit))...)
 		compacted := e.compactor.Compact(contextHistory)
 
 		// 2. Phase 1: 慢思考 —— 剥夺工具，强制规划

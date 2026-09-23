@@ -140,6 +140,18 @@ func (b *FeishuBot) HandleMessage(ctx context.Context, messageID, chatID, text s
 	}()
 }
 
+// TryWithChatLock 在会话空闲时执行 fn（如 /reset），会话有任务在跑时返回 false。
+func (b *FeishuBot) TryWithChatLock(chatID string, fn func()) bool {
+	lockAny, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	if !lock.TryLock() {
+		return false
+	}
+	defer lock.Unlock()
+	fn()
+	return true
+}
+
 func (b *FeishuBot) handleAgentRun(chatID, prompt string) {
 	lockAny, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
 	lock := lockAny.(*sync.Mutex)

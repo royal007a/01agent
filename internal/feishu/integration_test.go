@@ -33,7 +33,7 @@ func (p *rmProvider) Generate(_ context.Context, msgs []schema.Message, _ []sche
 	return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "call_rm", Name: "bash", Arguments: args}}}, nil
 }
 
-var taskIDRe = regexp.MustCompile(`任务 ID: ([0-9a-f]+)`)
+var taskIDMsgRe = regexp.MustCompile(`任务 ID: ([0-9a-f]+)`)
 
 func waitFor(t *testing.T, s *fakeSender, re *regexp.Regexp, from int) string {
 	t.Helper()
@@ -75,7 +75,7 @@ func TestFeishuApprovalEndToEnd(t *testing.T) {
 		os.MkdirAll(filepath.Join(wd, "build"), 0o755)
 		from := len(sender.msgs)
 		bot.HandleMessage(context.Background(), "m_"+tc.chat, tc.chat, "清理一下 build 目录")
-		id := waitFor(t, sender, taskIDRe, from)
+		id := waitFor(t, sender, taskIDMsgRe, from)
 		// 其他群的人不能批准
 		bot.HandleMessage(context.Background(), "x_"+tc.chat, "oc_other", "approve "+id)
 		bot.HandleMessage(context.Background(), "v_"+tc.chat, tc.chat, tc.verdict+" "+id)

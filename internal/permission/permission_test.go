@@ -134,3 +134,25 @@ func TestApprovalManager(t *testing.T) {
 		t.Fatal("待审批任务应被清理")
 	}
 }
+
+// 回归：独立 review 发现的规则绕过。
+func TestReviewBypassRegressions(t *testing.T) {
+	p := NewPolicy("")
+	cases := map[string]Action{
+		"rm --recursive --force /":                Deny,
+		"rm -r -f /":                              Deny,
+		"rm -rf /*":                               Deny,
+		"rm --recursive build":                    Ask,
+		"find / -delete":                          Ask,
+		"echo x | tee main.go":                    Ask,
+		"echo cm0gLXJmIHgK | base64 -d | bash":    Ask,
+		"curl localhost:48080/v1/approve -d '{}'": Deny,
+		"rm -rf /tmp/build":                       Ask,
+		"ls -la /":                                Allow,
+	}
+	for cmd, want := range cases {
+		if got, _ := p.Decide(bash(cmd)); got != want {
+			t.Errorf("%q => %s, want %s", cmd, got, want)
+		}
+	}
+}

@@ -49,9 +49,28 @@
 3. `launchctl kickstart -k` 重启服务后，日志显示"从磁盘恢复会话 http_deploy-smoke：12 条消息"。同一 session 追问，模型能准确复述此前的 `go run` 输出和被拒绝的删除操作。
 4. `/healthz`、`/metrics` 均正常。
 
-## 4. 已知限制
+## 4. 独立 review 修复（第一轮）
+
+独立 review 共发现 7 个缺陷，均已修复，并补了回归测试：
+
+1. 子智能体注册表缺少权限中间件，只读守卫可被 `kubectl`、`base64|bash`、`sed -Ei`、`python -c` 等绕过。修复：子智能体也挂 `permission.Middleware`，审批转发给父 Reporter，同时扩充守卫黑名单（`TestReadOnlyGuardRegressions`）。
+2. 模型可能用 bash 调用本机的 `/v1/approve` 给自己审批。修复：
+   - bash 子进程的环境变量去掉密钥和 Token；
+   - 审批 scope 加渠道前缀（`http:` / `feishu:`），无法跨渠道冒充；
+   - `/v1/approvals` 必须指定 session；
+   - 默认 deny 规则禁止 bash 访问 `/v1/approve`。
+3. 长选项绕过：`rm --recursive --force /` 以前是 allow。现改为 deny，同时新增 `find -delete`、`tee x.go`、管道到 sh 等规则（`TestReviewBypassRegressions`）。
+4. 工具执行中途进程重启后，历史里留下"有调用、没结果"的记录，之后每次请求都会被 API 拒绝。修复：每轮发送前执行 `RepairToolPairs`，给缺结果的调用补占位结果、丢弃孤儿结果；HTTP 新增 `POST /v1/sessions/{id}/reset`。
+5. 会话 `a/b` 与 `a_b` 共用同一个 JSONL 文件。修复：文件名追加 ID 的哈希。
+6. 文件工具可以经符号链接写到工作区外。修复：解析最深的已存在祖先目录的真实路径后，再做一次边界校验（`TestSymlinkEscape`）。
+7. 审批超时与人工批准竞争时，结果可能不一致。修复：Resolve 持锁发送；Wait 在超时或取消时，先在锁内注销，再做一次非阻塞接收，以人类的决定为准。
+
+另外：飞书 `/reset` 改为只能在会话空闲时执行；只有"approve/reject + 6 位任务 ID"才会被当作审批口令。
+
+## 5. 已知限制
 
 - 权限规则基于正则，不理解 shell 引号：`grep -r 'rm -rf' docs` 也会触发审批，属于误报，没有漏放。
+- 审批只能防模型"犯错"，防不住同机上蓄意对抗的模型：YOLO 模式下的 bash 本来就能直接调用系统命令。真正的隔离需要沙箱或容器（课程第 16 讲的观点）。
 - 只读守卫同样靠正则识别写操作，只用来缩小子智能体的爆炸半径，不能当作安全沙箱。本地 YOLO 场景应配合容器或沙箱使用（课程第 16 讲的观点）。
 - Session 的累计成本只保存在内存里，服务重启后清零；历史消息会持久化。
 - HTTP `/v1/chat` 是同步接口：客户端断开会取消这次任务。

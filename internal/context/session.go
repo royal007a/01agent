@@ -2,6 +2,8 @@ package context
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -118,6 +120,13 @@ func NewSessionManager(persistDir string) *SessionManager {
 
 var unsafeID = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 
+// fileNameFor 把会话 ID 映射为文件名：可读前缀 + ID 哈希，
+// 避免 "a/b" 与 "a_b" 这类经过字符替换后相同的 ID 共用同一个历史文件。
+func fileNameFor(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return unsafeID.ReplaceAllString(id, "_") + "-" + hex.EncodeToString(sum[:4]) + ".jsonl"
+}
+
 // GetOrCreate 获取或创建一个会话。
 func (sm *SessionManager) GetOrCreate(id, workDir string) *Session {
 	sm.mu.Lock()
@@ -128,7 +137,7 @@ func (sm *SessionManager) GetOrCreate(id, workDir string) *Session {
 	sess := NewSession(id, workDir)
 	if sm.persistDir != "" {
 		if err := os.MkdirAll(sm.persistDir, 0o755); err == nil {
-			sess.logPath = filepath.Join(sm.persistDir, unsafeID.ReplaceAllString(id, "_")+".jsonl")
+			sess.logPath = filepath.Join(sm.persistDir, fileNameFor(id))
 			if msgs, err := readJSONL(sess.logPath); err == nil && len(msgs) > 0 {
 				sess.history = msgs
 				log.Printf("[Session] 从磁盘恢复会话 %s：%d 条消息", id, len(msgs))

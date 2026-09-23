@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -69,6 +71,8 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 		return nil
 	}
 	cmd.WaitDelay = 2 * time.Second
+	// 不把 Harness 自己的密钥（模型 key、飞书凭据、HTTP 审批 Token）泄露给模型执行的命令
+	cmd.Env = scrubEnv(os.Environ())
 
 	out, err := cmd.CombinedOutput()
 	outputStr := string(out)
@@ -102,4 +106,16 @@ func clampOutput(s string) string {
 	}
 	half := BashMaxBytes / 2
 	return fmt.Sprintf("%s\n\n...[终端输出过长（共 %d 字节），中间部分已截断]...\n\n%s", textutil.Head(s, half), len(s), textutil.Tail(s, half))
+}
+
+var secretEnv = regexp.MustCompile(`(?i)^(CLAW_|FEISHU_|ZHIPU_|VOLCES_|ARK_|ANTHROPIC_|OPENAI_)|(KEY|TOKEN|SECRET|PASSWORD)[^=]*=`)
+
+func scrubEnv(env []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if !secretEnv.MatchString(kv) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

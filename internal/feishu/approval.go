@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
@@ -16,13 +17,15 @@ func (r *FeishuReporter) RequestApproval(ctx context.Context, req permission.App
 		return false, "飞书审批通道未启用，已拒绝高危操作。"
 	}
 	taskID := permission.NewTaskID()
-	return r.approvals.Wait(ctx, taskID, r.chatID, func() {
+	return r.approvals.Wait(ctx, taskID, "feishu:"+r.chatID, func() {
 		r.Send(fmt.Sprintf("⚠️ 高危操作审批请求\nAgent 试图执行以下动作:\n- 工具: %s\n- 参数: %s\n- 命中规则: %s\n任务 ID: %s\n👉 请回复 \"approve %s\" 或 \"reject %s\" 来决定是否放行。",
 			req.ToolName, textutil.Truncate(req.Args, 800, "..."), req.Rule, taskID, taskID, taskID))
 	})
 }
 
 var _ permission.Approver = (*FeishuReporter)(nil)
+
+var taskIDRe = regexp.MustCompile(`^[0-9a-f]{6}$`)
 
 // ApprovalCommand 拦截 approve/reject（以及中文 同意/拒绝）口令，唤醒挂起的引擎协程。
 func ApprovalCommand(m *permission.ApprovalManager, sender Sender) CommandFunc {
@@ -41,11 +44,14 @@ func ApprovalCommand(m *permission.ApprovalManager, sender Sender) CommandFunc {
 			return false
 		}
 		taskID := fields[1]
+		if !taskIDRe.MatchString(taskID) {
+			return false // "同意 这个方案" 之类的普通对话照常交给 Agent
+		}
 		reason := "人类管理员已批准操作"
 		if !allowed {
 			reason = "人类管理员认为该操作存在极高风险，已拒绝执行。请换一种更安全的方式，或向用户说明原因。"
 		}
-		if err := m.Resolve(taskID, chatID, allowed, reason); err != nil {
+		if err := m.Resolve(taskID, "feishu:"+chatID, allowed, reason); err != nil {
 			_ = sender.SendText(ctx, chatID, "⚠️ "+err.Error())
 		} else if allowed {
 			_ = sender.SendText(ctx, chatID, "✅ 已批准任务 "+taskID)

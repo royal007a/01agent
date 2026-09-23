@@ -138,3 +138,36 @@ func TestRecovery(t *testing.T) {
 		t.Fatal("文件类规则不应作用于 bash")
 	}
 }
+
+func TestRepairToolPairs(t *testing.T) {
+	msgs := []schema.Message{
+		{Role: schema.RoleUser, ToolCallID: "orphan", Content: "x"},
+		{Role: schema.RoleUser, Content: "q"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "a"}, {ID: "b"}}},
+		{Role: schema.RoleUser, ToolCallID: "b", Content: "rb"},
+		{Role: schema.RoleUser, Content: "重启后的新指令"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "c"}}}, // 结尾处中断
+	}
+	out := RepairToolPairs(msgs)
+	var ids []string
+	for _, m := range out {
+		ids = append(ids, string(m.Role)+":"+m.ToolCallID)
+	}
+	want := "user:,assistant:,user:a,user:b,user:,assistant:,user:c"
+	if strings.Join(ids, ",") != want {
+		t.Fatalf("got %s", strings.Join(ids, ","))
+	}
+	if out[2].Content != InterruptedToolOutput || !out[2].IsError || out[3].Content != "rb" {
+		t.Fatal("补位/保序错误")
+	}
+}
+
+func TestSessionFileNoCollision(t *testing.T) {
+	dir := t.TempDir()
+	m := NewSessionManager(dir)
+	m.GetOrCreate("a/b", "").Append(schema.Message{Role: schema.RoleUser, Content: "1"})
+	m.GetOrCreate("a_b", "").Append(schema.Message{Role: schema.RoleUser, Content: "2"})
+	if n := NewSessionManager(dir).GetOrCreate("a_b", "").Len(); n != 1 {
+		t.Fatalf("a/b 与 a_b 串了文件: %d", n)
+	}
+}

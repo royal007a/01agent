@@ -55,7 +55,8 @@ func buildEngine(workDir string, thinking, planMode bool) *app {
 	base.Register(tools.NewBashTool(wd))
 	base.Register(tools.NewEditFileTool(wd))
 	// 第 16 讲：allow/ask/deny 权限中间件，工作区 .claw/permissions.json 可热加载自定义规则
-	base.Use(permission.Middleware(permission.NewPolicy(filepath.Join(wd, ".claw", "permissions.json"))))
+	policy := permission.NewPolicy(filepath.Join(wd, ".claw", "permissions.json"))
+	base.Use(permission.Middleware(policy))
 	registry := observability.NewTimedRegistry(base, tracker.Stats)
 
 	eng := engine.NewAgentEngine(tracker, registry, thinking, planMode)
@@ -65,6 +66,7 @@ func buildEngine(workDir string, thinking, planMode bool) *app {
 	readOnly.Register(tools.NewReadFileTool(wd))
 	readOnly.Register(tools.NewBashTool(wd))
 	readOnly.Use(tools.ReadOnlyGuard())
+	readOnly.Use(permission.Middleware(policy)) // 守卫漏掉的高危命令仍需审批/受 deny 规则约束
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
 
 	return &app{eng: eng, workDir: wd, stats: tracker.Stats}

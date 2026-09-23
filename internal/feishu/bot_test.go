@@ -14,6 +14,7 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 )
 
 type fakeSender struct {
@@ -137,5 +138,15 @@ func TestParseTextContent(t *testing.T) {
 	got, err := ParseTextContent(`{"text":"@_user_1 第一行\n\"引号\""}`)
 	if err != nil || got != "第一行\n\"引号\"" {
 		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestApprovalCommandOnlyForTaskIDs(t *testing.T) {
+	cmd := ApprovalCommand(permission.NewApprovalManager(0), &fakeSender{})
+	if cmd(context.Background(), "oc", "同意 这个方案") {
+		t.Fatal("普通对话不应被当作审批口令")
+	}
+	if !cmd(context.Background(), "oc", "approve ab12cd") {
+		t.Fatal("合法口令应被拦截")
 	}
 }
