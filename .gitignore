@@ -1,0 +1,5 @@
+/claw
+/bin/
+/workspace/
+.env*
+*.log
