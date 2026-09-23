@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
@@ -18,75 +19,88 @@ import (
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/feishu"
+	"github.com/weberzhao/go-tiny-claw/internal/httpapi"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 )
 
-// serve 以飞书机器人服务端方式运行（第 09 讲）。
+// serve 以常驻服务方式运行：本地 HTTP API 始终开启；配置了飞书凭据时同时接入飞书（第 09/16 讲）。
 //
-//	FEISHU_APP_ID / FEISHU_APP_SECRET        必填
+//	CLAW_HTTP_TOKEN                          可选，HTTP API 的 Bearer Token
+//	FEISHU_APP_ID / FEISHU_APP_SECRET        设置后启用飞书机器人
 //	FEISHU_CONNECTION_MODE=ws|webhook        默认 ws：长连接，本地无公网 IP 也能收事件
 //	FEISHU_VERIFY_TOKEN / FEISHU_ENCRYPT_KEY webhook 模式下使用
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:48080", "HTTP 监听地址（webhook 与 /healthz）")
+	addr := fs.String("addr", "127.0.0.1:48080", "HTTP 监听地址（/healthz /metrics /v1/* /webhook/event）")
 	thinking := fs.Bool("thinking", false, "开启慢思考")
 	planMode := fs.Bool("plan", false, "开启 Plan Mode")
-	workDir := fs.String("workdir", "./workspace", "工作区目录")
+	workDir := fs.String("workdir", filepath.Join(defaultStateDir(), "workspace"), "工作区目录")
 	fs.Parse(args)
 
-	appID, appSecret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET")
-	if appID == "" || appSecret == "" {
-		log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
-	}
 	a := buildEngine(*workDir, *thinking, *planMode)
-	// 每个飞书会话（chat_id）一个 Session，JSONL 持久化，重启后自动恢复（第 11 讲）
+	// 每个入口会话一个 Session，JSONL 持久化，重启后自动恢复（第 11 讲）
 	sessions := ctxpkg.NewSessionManager(filepath.Join(defaultStateDir(), "sessions"))
-
-	bot := feishu.NewFeishuBot(feishu.NewLarkSender(appID, appSecret),
-		func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
-			return a.eng.Chat(ctx, sessions.GetOrCreate("feishu_"+chatID, a.workDir), prompt, r)
-		})
-	// 第 16 讲：高危命令挂起 → 飞书审批 → 唤醒
-	bot.Approvals = permission.NewApprovalManager(10 * time.Minute)
-	bot.UseCommand(feishu.ApprovalCommand(bot.Approvals, bot.Sender()))
-	bot.UseCommand(func(ctx context.Context, chatID, text string) bool {
-		if text != "/reset" && text != "/new" {
-			return false
-		}
-		sessions.Reset("feishu_" + chatID)
-		_ = bot.Sender().SendText(ctx, chatID, "🧹 已清空本会话的记忆。")
-		return true
-	})
-	dispatcher := bot.EventDispatcher(os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY"))
+	approvals := permission.NewApprovalManager(10 * time.Minute)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(a.stats.Snapshot())
 	})
-	mux.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
-	go func() {
-		log.Printf("🚀 go-tiny-claw 服务端已启动，HTTP 监听 %s (/healthz, /webhook/event)", *addr)
-		if err := http.ListenAndServe(*addr, mux); err != nil {
-			log.Fatalf("服务器启动失败: %v", err)
-		}
-	}()
+	api := &httpapi.Server{Engine: a.eng, Sessions: sessions, WorkDir: a.workDir, Approvals: approvals, Token: os.Getenv("CLAW_HTTP_TOKEN")}
+	api.Register(mux)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if mode := os.Getenv("FEISHU_CONNECTION_MODE"); mode == "" || mode == "ws" || mode == "websocket" {
-		cli := larkws.NewClient(appID, appSecret, larkws.WithEventHandler(dispatcher))
-		log.Println("[Feishu] 使用长连接 (WebSocket) 模式接收事件")
-		go func() {
-			if err := cli.Start(ctx); err != nil {
-				log.Fatalf("飞书长连接失败: %v", err)
+
+	var bot *feishu.FeishuBot
+	if appID, appSecret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET"); appID != "" && appSecret != "" {
+		bot = feishu.NewFeishuBot(feishu.NewLarkSender(appID, appSecret),
+			func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
+				return a.eng.Chat(ctx, sessions.GetOrCreate("feishu_"+chatID, a.workDir), prompt, r)
+			})
+		// 第 16 讲：高危命令挂起 → 飞书审批 → 唤醒
+		bot.Approvals = approvals
+		bot.UseCommand(feishu.ApprovalCommand(approvals, bot.Sender()))
+		bot.UseCommand(func(ctx context.Context, chatID, text string) bool {
+			if text != "/reset" && text != "/new" {
+				return false
 			}
-		}()
+			sessions.Reset("feishu_" + chatID)
+			_ = bot.Sender().SendText(ctx, chatID, "🧹 已清空本会话的记忆。")
+			return true
+		})
+		dispatcher := bot.EventDispatcher(os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY"))
+		mux.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
+		if mode := os.Getenv("FEISHU_CONNECTION_MODE"); mode == "" || mode == "ws" || mode == "websocket" {
+			cli := larkws.NewClient(appID, appSecret, larkws.WithEventHandler(dispatcher))
+			log.Println("[Feishu] 使用长连接 (WebSocket) 模式接收事件")
+			go func() {
+				if err := cli.Start(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("[Feishu] 长连接退出: %v", err)
+				}
+			}()
+		} else {
+			log.Println("[Feishu] 使用 Webhook 模式，请把 http://<公网地址>/webhook/event 配置到开发者后台")
+		}
 	} else {
-		log.Println("[Feishu] 使用 Webhook 模式，请把 http://<公网地址>/webhook/event 配置到开发者后台")
+		log.Println("[Feishu] 未配置 FEISHU_APP_ID/FEISHU_APP_SECRET，仅启用本地 HTTP API")
 	}
+
+	srv := &http.Server{Addr: *addr, Handler: mux}
+	go func() {
+		log.Printf("🚀 go-tiny-claw 服务端已启动: http://%s （工作区 %s）", *addr, a.workDir)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("服务器启动失败: %v", err)
+		}
+	}()
 	<-ctx.Done()
 	log.Println("收到退出信号，等待进行中的任务结束...")
-	bot.Wait()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+	if bot != nil {
+		bot.Wait()
+	}
 }

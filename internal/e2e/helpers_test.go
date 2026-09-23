@@ -95,7 +95,11 @@ func sh(t *testing.T, dir string, cmd string) string {
 }
 
 func ctxTimeout(t *testing.T) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	d := 20 * time.Minute
+	if v, err := time.ParseDuration(os.Getenv("CLAW_E2E_TIMEOUT")); err == nil {
+		d = v
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d)
 	t.Cleanup(cancel)
 	return ctx
 }

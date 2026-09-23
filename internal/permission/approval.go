@@ -17,8 +17,18 @@ type ApprovalResult struct {
 }
 
 type pending struct {
-	ch    chan ApprovalResult
-	scope string // 只有同一 scope（如同一个飞书会话）的回复才能解除阻塞
+	ch      chan ApprovalResult
+	scope   string // 只有同一 scope（如同一个飞书会话）的回复才能解除阻塞
+	summary string
+	since   time.Time
+}
+
+// PendingInfo 对外展示的待审批任务。
+type PendingInfo struct {
+	TaskID  string    `json:"task_id"`
+	Scope   string    `json:"scope"`
+	Summary string    `json:"summary"`
+	Since   time.Time `json:"since"`
 }
 
 // ApprovalManager 基于 channel 的跨协程审批中枢：引擎协程挂起等待，Webhook 协程负责唤醒。
@@ -41,9 +51,14 @@ func NewTaskID() string {
 
 // Wait 注册一个待审批任务，调用 notify 把请求发给人类，然后阻塞直到被 Resolve、超时或 ctx 取消。
 func (m *ApprovalManager) Wait(ctx context.Context, taskID, scope string, notify func()) (bool, string) {
+	return m.WaitWithSummary(ctx, taskID, scope, "", notify)
+}
+
+// WaitWithSummary 同 Wait，并附带一段可供列表展示的摘要。
+func (m *ApprovalManager) WaitWithSummary(ctx context.Context, taskID, scope, summary string, notify func()) (bool, string) {
 	ch := make(chan ApprovalResult, 1) // 容量为 1，Resolve 永不阻塞
 	m.mu.Lock()
-	m.pending[taskID] = &pending{ch: ch, scope: scope}
+	m.pending[taskID] = &pending{ch: ch, scope: scope, summary: summary, since: time.Now()}
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -87,6 +102,19 @@ func (m *ApprovalManager) Resolve(taskID, scope string, allowed bool, reason str
 	default:
 		return fmt.Errorf("任务 %s 已经被审批过了", taskID)
 	}
+}
+
+// List 列出某个 scope（为空则全部）下等待中的任务。
+func (m *ApprovalManager) List(scope string) []PendingInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []PendingInfo{}
+	for id, p := range m.pending {
+		if scope == "" || p.scope == scope {
+			out = append(out, PendingInfo{TaskID: id, Scope: p.scope, Summary: p.summary, Since: p.since})
+		}
+	}
+	return out
 }
 
 // Pending 返回当前等待中的任务数。
