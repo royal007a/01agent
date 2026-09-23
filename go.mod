@@ -3,11 +3,17 @@ module github.com/weberzhao/go-tiny-claw
 go 1.26
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.72.0 // indirect
+	github.com/anthropics/anthropic-sdk-go v1.72.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
+	github.com/openai/openai-go/v3 v3.61.0
+)
+
+require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
-	github.com/openai/openai-go/v3 v3.61.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect

@@ -1,0 +1,69 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
+	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/feishu"
+)
+
+// serve 以飞书机器人服务端方式运行（第 09 讲）。
+//
+//	FEISHU_APP_ID / FEISHU_APP_SECRET        必填
+//	FEISHU_CONNECTION_MODE=ws|webhook        默认 ws：长连接，本地无公网 IP 也能收事件
+//	FEISHU_VERIFY_TOKEN / FEISHU_ENCRYPT_KEY webhook 模式下使用
+func serve(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:48080", "HTTP 监听地址（webhook 与 /healthz）")
+	thinking := fs.Bool("thinking", false, "开启慢思考")
+	workDir := fs.String("workdir", "./workspace", "工作区目录")
+	fs.Parse(args)
+
+	appID, appSecret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET")
+	if appID == "" || appSecret == "" {
+		log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
+	}
+	eng, _ := buildEngine(*workDir, *thinking)
+
+	bot := feishu.NewFeishuBot(feishu.NewLarkSender(appID, appSecret),
+		func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
+			return eng.Run(ctx, prompt, r)
+		})
+	dispatcher := bot.EventDispatcher(os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY"))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/webhook/event", httpserverext.NewEventHandlerFunc(dispatcher))
+	go func() {
+		log.Printf("🚀 go-tiny-claw 服务端已启动，HTTP 监听 %s (/healthz, /webhook/event)", *addr)
+		if err := http.ListenAndServe(*addr, mux); err != nil {
+			log.Fatalf("服务器启动失败: %v", err)
+		}
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if mode := os.Getenv("FEISHU_CONNECTION_MODE"); mode == "" || mode == "ws" || mode == "websocket" {
+		cli := larkws.NewClient(appID, appSecret, larkws.WithEventHandler(dispatcher))
+		log.Println("[Feishu] 使用长连接 (WebSocket) 模式接收事件")
+		go func() {
+			if err := cli.Start(ctx); err != nil {
+				log.Fatalf("飞书长连接失败: %v", err)
+			}
+		}()
+	} else {
+		log.Println("[Feishu] 使用 Webhook 模式，请把 http://<公网地址>/webhook/event 配置到开发者后台")
+	}
+	<-ctx.Done()
+	log.Println("收到退出信号，等待进行中的任务结束...")
+	bot.Wait()
+}

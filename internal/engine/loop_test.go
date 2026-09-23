@@ -49,7 +49,7 @@ func (f *fakeRegistry) Execute(_ context.Context, call schema.ToolCall) schema.T
 func TestTwoStageLoop(t *testing.T) {
 	for _, thinking := range []bool{false, true} {
 		p, r := &scriptedProvider{}, &fakeRegistry{}
-		if err := NewAgentEngine(p, r, t.TempDir(), thinking).Run(context.Background(), "检查文件"); err != nil {
+		if err := NewAgentEngine(p, r, t.TempDir(), thinking).Run(context.Background(), "检查文件", nil); err != nil {
 			t.Fatal(err)
 		}
 		if p.actions != 2 || len(r.calls) != 1 {
@@ -100,7 +100,7 @@ func TestExecuteToolsParallelAndOrdered(t *testing.T) {
 		{ID: "c", Name: "ro", Arguments: []byte(`"3"`)},
 	}
 	start := time.Now()
-	obs := e.executeTools(context.Background(), calls)
+	obs := e.executeTools(context.Background(), calls, NopReporter{})
 	if d := time.Since(start); d > 700*time.Millisecond {
 		t.Fatalf("只读批次应并发执行，耗时 %v", d)
 	}
@@ -111,7 +111,7 @@ func TestExecuteToolsParallelAndOrdered(t *testing.T) {
 	}
 	calls[1].Name = "rw"
 	start = time.Now()
-	e.executeTools(context.Background(), calls)
+	e.executeTools(context.Background(), calls, NopReporter{})
 	if d := time.Since(start); d < 850*time.Millisecond {
 		t.Fatalf("含写操作的批次应串行，耗时 %v", d)
 	}

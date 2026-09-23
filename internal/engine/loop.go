@@ -9,6 +9,7 @@ import (
 
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
+	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
 )
 
@@ -40,7 +41,10 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 }
 
 // Run 启动 Agent 的生命周期。
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
+func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
+	if reporter == nil {
+		reporter = NopReporter{}
+	}
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v", e.EnableThinking)
 
@@ -56,13 +60,14 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// Phase 1: 慢思考 —— 剥夺工具，强制规划
 		if e.EnableThinking {
 			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
+			reporter.OnThinking(ctx)
 			thinkReq := append(append([]schema.Message{}, contextHistory...), schema.Message{Role: schema.RoleUser, Content: thinkingNudge})
 			thinkResp, err := e.provider.Generate(ctx, thinkReq, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
-				fmt.Printf("  🧠 [内部思考 Trace]: %s\n", thinkResp.Content)
+				log.Printf("[Engine] 🧠 内部思考 Trace: %s", textutil.Truncate(thinkResp.Content, 300, "..."))
 				contextHistory = append(contextHistory, *thinkResp)
 			}
 		}
@@ -79,7 +84,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		}
 		contextHistory = append(contextHistory, *actionResp)
 		if actionResp.Content != "" {
-			fmt.Printf("  🤖 [对外回复]: %s\n", actionResp.Content)
+			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
 		// 退出条件：模型没有请求任何工具调用
@@ -90,7 +95,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 		// 执行行动 (Action) 与获取观察结果 (Observation)：Fork-Join 并发执行（第 08 讲）
 		log.Printf("[Engine] 模型请求调用 %d 个工具...", len(actionResp.ToolCalls))
-		observations := e.executeTools(ctx, actionResp.ToolCalls)
+		observations := e.executeTools(ctx, actionResp.ToolCalls, reporter)
 		contextHistory = append(contextHistory, observations...)
 	}
 }
@@ -104,13 +109,16 @@ const MaxParallelTools = 5
 // 并推荐"只读并发、涉写串行"。这里取两者之长：整批都是只读工具时并发（带信号量限流），
 // 只要混入任何有副作用的工具（write/edit/bash），就退化为按顺序串行执行。
 // 两种路径都写入预分配切片的固定下标，天然保序、无需加锁。
-func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall) []schema.Message {
+func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall, reporter Reporter) []schema.Message {
 	observations := make([]schema.Message, len(calls))
 	run := func(idx int, call schema.ToolCall) {
-		log.Printf("  -> [Go-%d] 🛠️ 执行工具: %s, 参数: %s", idx, call.Name, string(call.Arguments))
+		log.Printf("  -> [Go-%d] 🛠️ 执行工具: %s, 参数: %s", idx, call.Name, textutil.Truncate(string(call.Arguments), 300, "..."))
+		reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
 		result := e.registry.Execute(ctx, call)
+		// 人类看到的是缩略版（防止飞书消息过长）；传给模型的 Observation 依然是完整数据
+		reporter.OnToolResult(ctx, call.Name, textutil.Truncate(result.Output, 200, "... (已截断)"), result.IsError)
 		if result.IsError {
-			log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s", idx, result.Output)
+			log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s", idx, textutil.Truncate(result.Output, 300, "..."))
 		} else {
 			log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)", idx, len(result.Output))
 		}
