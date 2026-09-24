@@ -1,9 +1,12 @@
 package context
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 )
@@ -56,6 +59,9 @@ func (c *PromptComposer) Build() schema.Message {
 	var b strings.Builder
 	// 1. 极简内核
 	b.WriteString(minimalCore)
+	// 1.5 运行环境（课程之外的增强，参考 Claude Code 的 env 注入）：告诉模型"你在哪、这里有什么"。
+	// 实测本地 8B 模型在不知道工作区的情况下会去猜 /usr/local/nginx/... 这类系统路径，一路撞墙。
+	b.WriteString(envSection(c.workDir))
 	// 2. Plan Mode：只有显式开启时才注入重型的状态外部化规范
 	if c.planMode {
 		b.WriteString(planModeRules)
@@ -70,4 +76,42 @@ func (c *PromptComposer) Build() schema.Message {
 	// 4. 技能外挂
 	b.WriteString(c.skillLoader.LoadAll())
 	return schema.Message{Role: schema.RoleSystem, Content: b.String()}
+}
+
+// envSection 生成运行环境描述：工作区绝对路径、系统、日期与顶层目录清单（最多 40 项）。
+func envSection(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n# 运行环境\n")
+	fmt.Fprintf(&b, "- 工作区（你的当前目录，bash 在这里执行，文件工具的相对路径以它为根）：%s\n", workDir)
+	fmt.Fprintf(&b, "- 系统：%s/%s，日期：%s\n", runtime.GOOS, runtime.GOARCH, time.Now().Format("2006-01-02"))
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return b.String()
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if n == ".claw" || n == ".git" {
+			continue
+		}
+		if e.IsDir() {
+			n += "/"
+		}
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		b.WriteString("- 工作区目前是空的\n")
+		return b.String()
+	}
+	more := ""
+	if len(names) > 40 {
+		more = fmt.Sprintf(" …（共 %d 项）", len(names))
+		names = names[:40]
+	}
+	fmt.Fprintf(&b, "- 工作区顶层内容：%s%s\n", strings.Join(names, "  "), more)
+	b.WriteString("- 任务涉及的文件优先在工作区内查找，不要臆测系统路径。\n")
+	return b.String()
 }

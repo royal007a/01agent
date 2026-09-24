@@ -54,6 +54,24 @@ Codex 对第 19–22 讲的 review 结论：race、装配、意图过滤均通�
 - **Trace 文件名可能冲突**：同会话同一毫秒导出时会互相覆盖，且 Perfetto 写入失败会被静默忽略。现在文件名追加随机后缀并以 `O_EXCL` 创建，写入失败会返回错误；Trace 路径改由引擎回传，不再靠 glob 查找。回归测试为 `TestExportNoOverwrite`。
 - **P2 设计边界**：Benchmark 的 Setup/Validate 直接用宿主机 bash 执行，没有 OS 沙箱，用例文件必须可信。严格隔离需要容器（参见"已知限制"）。
 
+### 本地模型替代验证（Ollama，2026-09-24）
+
+方舟和 MiniMax 额度耗尽后，改用本机 Ollama 的 OpenAI 兼容接口（`source scripts/env.sh ollama`）。这一轮同时证明了第 04 讲的 Provider 抽象可以直接接入本地模型。
+
+| 验证项 | qwen2.5:7b | qwen3:8b |
+|---|---|---|
+| L19 Tracing（并行工具 + Trace 导出） | ✅ | ✅ |
+| L22 AgentOps（真机） | ❌ | ❌（审批、Skill 注入正常；模型把工作区绝对路径写错、整份读大日志，最终没改对配置） |
+| Benchmark 7 题 | 0/7 → 加防护后 1/7 | 2/7（一发入魂 2 题）；t06 在加上审批策略后单独重跑 ✅ |
+
+报告见 `docs/bench/`。跑分驱动发现并修复的 Harness 问题：
+1. **防早退**：模型说"首先我将…"却没有调用工具就结束了 → 最多注入 2 次提醒（`EarlyExitNudges`）。
+2. **正文工具调用还原**：模型把工具调用写成正文里的 JSON 代码块 → 若 name 是可用工具，就还原为结构化 ToolCall。
+3. **跑分审批策略**：没有审批通道时，`ask` 规则会 fail-closed 变成拒绝，测不到"需审批的正常操作" → 用例新增 `approval: approve|reject`，并统计审批次数。
+4. **运行环境注入**：模型不知道工作区在哪，于是去猜 `/usr/local/nginx/...` → System Prompt 新增"运行环境"（工作区绝对路径、系统、日期、顶层文件）。
+
+结论：7B/8B 本地模型的剩余失败，经 Trace 复盘都属于模型能力问题（编造文件内容、路径写错、反复换关键词搜索），不是 Harness 缺陷。L22 真机和 doubao 基线仍需等方舟额度恢复后补跑。
+
 **真实模型验证受阻**：本机可用的方舟 key（月/周额度）和 MiniMax key（Token Plan）都已用尽。方舟最早在 09-28 重置周额度，月额度要到 10-08。额度恢复或换一个可用的 key 后，执行 `make live RUN='L19|L22'` 和 `make bench` 即可补齐。
 
 ## 3. 本地部署验证

@@ -62,7 +62,7 @@ func TestRunSuiteAndReport(t *testing.T) {
 	baseline.Results = append([]Result(nil), rep.Results...)
 	baseline.Results[1].Passed = true
 	md := rep.Markdown(&baseline)
-	for _, want := range []string{"1/3", "⚠️ 回归", "| ok | ✅ | 3 | 2(1) | 1 |"} {
+	for _, want := range []string{"1/3", "⚠️ 回归", "| ok | ✅ | 3 | 2(1) | 1 | 0 | 0 |"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("报告缺少 %q:\n%s", want, md)
 		}
@@ -98,5 +98,28 @@ func TestEmptyValidateRejected(t *testing.T) {
 	rep := r.RunSuite(context.Background(), []TestCase{{ID: "empty", Prompt: "写 42", Validate: ""}})
 	if rep.Passed != 0 || !strings.Contains(rep.Results[0].Error, "用例定义无效") {
 		t.Fatalf("空判卷被判通过: %+v", rep.Results[0])
+	}
+}
+
+// rmScript：请求 rm -rf build（ask 规则）后收工。
+type rmScript struct{}
+
+func (rmScript) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	if msgs[len(msgs)-1].IsToolResult() {
+		return &schema.Message{Role: schema.RoleAssistant, Content: "done"}, nil
+	}
+	return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "1", Name: "bash", Arguments: []byte(`{"command":"rm -rf build"}`)}}}, nil
+}
+
+func TestApprovalPolicy(t *testing.T) {
+	r := &Runner{LLM: rmScript{}, WorkRoot: t.TempDir()}
+	cases := []TestCase{
+		{ID: "approve", Setup: "mkdir build", Prompt: "清理", Validate: "! test -d build"},
+		{ID: "reject", Setup: "mkdir build", Prompt: "清理", Validate: "test -d build", Approval: "reject"},
+		{ID: "bad", Prompt: "x", Validate: "true", Approval: "maybe"},
+	}
+	rep := r.RunSuite(context.Background(), cases)
+	if !rep.Results[0].Passed || !rep.Results[1].Passed || rep.Results[0].Approvals != 1 || rep.Results[2].Passed {
+		t.Fatalf("%+v", rep.Results)
 	}
 }

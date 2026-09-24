@@ -195,3 +195,14 @@ func TestSessionTruncatedTailRepair(t *testing.T) {
 		t.Fatal("原损坏文件应被隔离备份")
 	}
 }
+
+func TestEnvSection(t *testing.T) {
+	wd := t.TempDir()
+	os.WriteFile(filepath.Join(wd, "nginx.conf"), nil, 0o644)
+	os.MkdirAll(filepath.Join(wd, "logs"), 0o755)
+	os.MkdirAll(filepath.Join(wd, ".claw"), 0o755)
+	c := NewPromptComposer(wd, false).Build().Content
+	if !strings.Contains(c, "# 运行环境") || !strings.Contains(c, wd) || !strings.Contains(c, "nginx.conf") || !strings.Contains(c, "logs/") || strings.Contains(c, ".claw/") {
+		t.Fatalf("运行环境段落错误:\n%s", c)
+	}
+}

@@ -18,6 +18,8 @@ import (
 
 	clawapp "github.com/weberzhao/go-tiny-claw/internal/app"
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 	"github.com/weberzhao/go-tiny-claw/internal/trace"
@@ -35,6 +37,27 @@ type TestCase struct {
 	Thinking bool     `json:"thinking,omitempty"`
 	PlanMode bool     `json:"plan_mode,omitempty"`
 	Timeout  int      `json:"timeout_sec,omitempty"`
+	// Approval 模拟值班人员对 ask 类高危操作的审批："approve"（默认，全部同意）/ "reject"（全部拒绝）。
+	// 没有审批通道时 ask 会 fail-closed 变成拒绝，跑分就测不到"需要审批的正常操作"了。
+	Approval string `json:"approval,omitempty"`
+}
+
+// autoApprover 按用例策略自动审批，并记录审批次数。
+type autoApprover struct {
+	engine.NopReporter
+	approve bool
+	mu      sync.Mutex
+	count   int
+}
+
+func (a *autoApprover) RequestApproval(_ context.Context, req permission.ApprovalRequest) (bool, string) {
+	a.mu.Lock()
+	a.count++
+	a.mu.Unlock()
+	if a.approve {
+		return true, ""
+	}
+	return false, "Benchmark 审批策略：拒绝所有高危操作。"
 }
 
 // Result 单个用例的结果。除 pass/fail 外还记录轨迹指标（第 20 讲思考题）：
@@ -55,6 +78,7 @@ type Result struct {
 	RecoveryHints    int     `json:"recovery_hints"`
 	Reminders        int     `json:"reminders"`
 	FirstTry         bool    `json:"first_try"` // 通过且全程无工具报错：一发入魂
+	Approvals        int     `json:"approvals"`
 	WorkDir          string  `json:"work_dir,omitempty"`
 	TracePath        string  `json:"trace_path,omitempty"`
 }
@@ -209,6 +233,10 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	}()
 
 	// 1. Setup 靶机
+	if tc.Approval != "" && tc.Approval != "approve" && tc.Approval != "reject" {
+		res.Error = "用例定义无效: approval 只能是 approve 或 reject"
+		return
+	}
 	if tc.Setup != "" {
 		if out, err := runScript(ctx, wd, tc.Setup, 2*time.Minute); err != nil {
 			res.Error = fmt.Sprintf("靶机 Setup 失败: %v\n%s", err, out)
@@ -236,7 +264,9 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	sess := ctxpkg.NewSession("bench_"+tc.ID, wd)
-	runErr := a.Engine.Chat(runCtx, sess, tc.Prompt, nil)
+	approver := &autoApprover{approve: tc.Approval != "reject"}
+	runErr := a.Engine.Chat(runCtx, sess, tc.Prompt, approver)
+	res.Approvals = approver.count
 
 	// 3. 采集成本与轨迹指标
 	res.PromptTokens, res.CompletionTokens, res.CostCNY = sess.UsageSnapshot()
@@ -303,11 +333,11 @@ func (rep Report) Markdown(baseline *Report) string {
 		fmt.Fprintf(&b, "- 对比基线（%s）：通过率 %.0f%% → %.0f%%，成本 ¥%.4f → ¥%.4f，平均轮数 %.1f → %.1f\n",
 			baseline.StartedAt.Format("01-02 15:04"), baseline.PassRate*100, rep.PassRate*100, baseline.TotalCost, rep.TotalCost, baseline.AvgTurns, rep.AvgTurns)
 	}
-	b.WriteString("\n| 用例 | 结果 | 轮数 | 工具调用(失败) | 自愈提示 | Reminder | Token 入/出 | 成本 | 耗时 |")
+	b.WriteString("\n| 用例 | 结果 | 轮数 | 工具调用(失败) | 自愈提示 | Reminder | 审批 | Token 入/出 | 成本 | 耗时 |")
 	if baseline != nil {
 		b.WriteString(" 基线 |")
 	}
-	b.WriteString("\n|---|---|---|---|---|---|---|---|---|")
+	b.WriteString("\n|---|---|---|---|---|---|---|---|---|---|")
 	if baseline != nil {
 		b.WriteString("---|")
 	}
@@ -327,8 +357,8 @@ func (rep Report) Markdown(baseline *Report) string {
 		} else if r.Passed {
 			mark = "✅"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %d | %d(%d) | %d | %d | %d/%d | ¥%.4f | %.1fs |", r.ID, mark, r.Turns, r.ToolCalls, r.ToolErrors,
-			r.RecoveryHints, r.Reminders, r.PromptTokens, r.CompletionTokens, r.CostCNY, float64(r.DurationMs)/1000)
+		fmt.Fprintf(&b, "| %s | %s | %d | %d(%d) | %d | %d | %d | %d/%d | ¥%.4f | %.1fs |", r.ID, mark, r.Turns, r.ToolCalls, r.ToolErrors,
+			r.RecoveryHints, r.Reminders, r.Approvals, r.PromptTokens, r.CompletionTokens, r.CostCNY, float64(r.DurationMs)/1000)
 		if baseline != nil {
 			if br, ok := base[r.ID]; !ok {
 				b.WriteString(" 新增 |")

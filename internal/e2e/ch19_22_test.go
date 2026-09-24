@@ -11,6 +11,7 @@ import (
 
 	clawapp "github.com/weberzhao/go-tiny-claw/internal/app"
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/trace"
 )
@@ -55,7 +56,8 @@ func TestL22_AgentOps(t *testing.T) {
 	}
 	a.Engine.MaxTurns = 20
 	rec := newRec()
-	rec.In = strings.NewReader("y\nn\nn\nn\n") // 第一次审批（edit）同意，之后（reload 等）拒绝
+	// 值班工程师的决策：改配置（edit/write）同意，重启/杀进程等 bash 高危操作拒绝
+	rec.approve = func(req permission.ApprovalRequest) bool { return req.ToolName != "bash" }
 	if err := a.Engine.Chat(ctxTimeout(t), ctxpkg.NewSession("agentops", wd), "线上似乎出了点问题，帮我去服务器工作区里排查一下为什么 Nginx 起不来，并尝试修复它。", rec); err != nil {
 		t.Fatal(err)
 	}
@@ -66,5 +68,9 @@ func TestL22_AgentOps(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wd, ".nginx_reloaded")); err == nil {
 		t.Fatal("reload 被拒绝后不应执行")
 	}
-	t.Logf("调用轨迹:\n%s\n最终回复: %s", rec.callsJoined(), rec.lastMsg())
+	calls := rec.callsJoined()
+	t.Logf("调用轨迹:\n%s\n最终回复: %s", calls, rec.lastMsg())
+	if !strings.Contains(calls, "APPROVAL edit_file") {
+		t.Fatal("修改配置应经过审批")
+	}
 }

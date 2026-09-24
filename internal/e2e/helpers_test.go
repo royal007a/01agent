@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
 )
@@ -111,6 +112,21 @@ type recReporter struct {
 	calls  []string
 	msgs   []string
 	onCall func(count int)
+	// approve 非空时按请求内容决定审批（优先于终端输入）
+	approve func(req permission.ApprovalRequest) bool
+}
+
+func (r *recReporter) RequestApproval(ctx context.Context, req permission.ApprovalRequest) (bool, string) {
+	if r.approve != nil {
+		r.mu.Lock()
+		r.calls = append(r.calls, "APPROVAL "+req.ToolName+" "+req.Args)
+		r.mu.Unlock()
+		if r.approve(req) {
+			return true, ""
+		}
+		return false, "人类值班工程师拒绝了该操作。"
+	}
+	return r.TerminalReporter.RequestApproval(ctx, req)
 }
 
 func newRec() *recReporter {
