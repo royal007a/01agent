@@ -2,6 +2,8 @@ package eval
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -74,5 +76,27 @@ func TestLoadCases(t *testing.T) {
 	cs, err := LoadCases("../../bench/cases.json", "^t0[12]")
 	if err != nil || len(cs) != 2 || cs[0].Validate == "" {
 		t.Fatal(cs, err)
+	}
+}
+
+// 回归：空判卷脚本不能"自动满分"。
+func TestEmptyValidateRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cases.json")
+	for _, bad := range []string{
+		`[{"id":"a","prompt":"x","validate":"  "}]`,
+		`[{"id":"a","prompt":"x"}]`,
+		`[{"id":"a","prompt":"","validate":"true"}]`,
+		`[{"id":"a","prompt":"x","validate":"true"},{"id":"a","prompt":"y","validate":"true"}]`,
+	} {
+		os.WriteFile(path, []byte(bad), 0o644)
+		if _, err := LoadCases(path, ""); err == nil {
+			t.Errorf("应拒绝: %s", bad)
+		}
+	}
+	r := &Runner{LLM: scripted{}, WorkRoot: t.TempDir()}
+	rep := r.RunSuite(context.Background(), []TestCase{{ID: "empty", Prompt: "写 42", Validate: ""}})
+	if rep.Passed != 0 || !strings.Contains(rep.Results[0].Error, "用例定义无效") {
+		t.Fatalf("空判卷被判通过: %+v", rep.Results[0])
 	}
 }

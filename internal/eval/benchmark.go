@@ -93,6 +93,9 @@ func LoadCases(path, filter string) ([]TestCase, error) {
 	if err := json.Unmarshal(b, &cases); err != nil {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
+	if err := validateCases(cases); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	if filter == "" {
 		return cases, nil
 	}
@@ -107,6 +110,27 @@ func LoadCases(path, filter string) ([]TestCase, error) {
 		}
 	}
 	return out, nil
+}
+
+// validateCases 保证判卷可信：空判卷脚本 `bash -c ""` 会返回 0，等于"自动满分"。
+func validateCases(cases []TestCase) error {
+	seen := map[string]bool{}
+	for i, c := range cases {
+		if strings.TrimSpace(c.ID) == "" {
+			return fmt.Errorf("第 %d 个用例缺少 id", i+1)
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("用例 id %q 重复", c.ID)
+		}
+		seen[c.ID] = true
+		if strings.TrimSpace(c.Prompt) == "" {
+			return fmt.Errorf("用例 %s 缺少 prompt", c.ID)
+		}
+		if strings.TrimSpace(c.Validate) == "" {
+			return fmt.Errorf("用例 %s 缺少 validate 判卷脚本", c.ID)
+		}
+	}
+	return nil
 }
 
 // RunSuite 并发执行所有用例（彼此工作区隔离），汇总报告。
@@ -160,6 +184,10 @@ func (r *Runner) RunSuite(ctx context.Context, cases []TestCase) Report {
 func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	res = Result{ID: tc.ID, Name: tc.Name}
 	start := time.Now()
+	if err := validateCases([]TestCase{tc}); err != nil { // 直接调用 RunSuite 的场景同样拒绝空判卷
+		res.Error = "用例定义无效: " + err.Error()
+		return
+	}
 	defer func() { res.DurationMs = time.Since(start).Milliseconds() }()
 
 	root := r.WorkRoot
@@ -214,9 +242,7 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	res.PromptTokens, res.CompletionTokens, res.CostCNY = sess.UsageSnapshot()
 	if rootSpan != nil {
 		collectTrajectory(rootSpan, &res)
-		if files, _ := filepath.Glob(filepath.Join(tracesDir, "trace_*[0-9].json")); len(files) > 0 {
-			res.TracePath = files[len(files)-1]
-		}
+		res.TracePath, _ = rootSpan.Get("trace_path").(string)
 	}
 	if runErr != nil {
 		res.Error = "Agent 运行失败: " + runErr.Error()

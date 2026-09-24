@@ -4,6 +4,8 @@ package trace
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -146,19 +148,40 @@ func Export(root *Span, dir, sessionID string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	base := filepath.Join(dir, fmt.Sprintf("trace_%s_%s", unsafe.ReplaceAllString(sessionID, "_"), root.StartTime.Format("20060102-150405.000")))
 	tree, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(base+".json", tree, 0o644); err != nil {
+	events, err := json.Marshal(map[string]any{"traceEvents": chromeEvents(root), "displayTimeUnit": "ms"})
+	if err != nil {
 		return "", err
 	}
-	events, err := json.Marshal(map[string]any{"traceEvents": chromeEvents(root), "displayTimeUnit": "ms"})
-	if err == nil {
-		_ = os.WriteFile(base+".perfetto.json", events, 0o644)
+	// 文件名 = 会话 + 毫秒时间戳 + 随机后缀，并用 O_EXCL 创建：同会话同毫秒的两次 Run 也不会互相覆盖
+	prefix := fmt.Sprintf("trace_%s_%s_", unsafe.ReplaceAllString(sessionID, "_"), root.StartTime.Format("20060102-150405.000"))
+	for attempt := 0; attempt < 5; attempt++ {
+		b := make([]byte, 3)
+		_, _ = rand.Read(b)
+		base := filepath.Join(dir, prefix+hex.EncodeToString(b))
+		f, err := os.OpenFile(base+".json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := f.Write(tree)
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			return "", werr
+		}
+		if err := os.WriteFile(base+".perfetto.json", events, 0o644); err != nil {
+			return base + ".json", fmt.Errorf("决策树已写入，但 Perfetto 文件写入失败: %w", err)
+		}
+		return base + ".json", nil
 	}
-	return base + ".json", nil
+	return "", fmt.Errorf("无法为 trace 生成唯一文件名")
 }
 
 // chromeEvents 转换为 Trace Event "X"（complete）事件。

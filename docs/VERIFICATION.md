@@ -49,6 +49,11 @@
 | 21 CLI | `app.Build` 被 CLI、服务端、Benchmark 共用；竞态修复题 t07 的判卷脚本已校验 | 待补：`make bench RUN=t07` |
 | 22 AgentOps | `httpapi.TestAgentOpsScenario`：AGENTS.md 与 Skill 注入，tail 大日志，edit 审批通过后修复配置，`nginx -t` 通过，reload 审批被拒且未执行，导出 Trace；`feishu.TestWebhookFlow` 验证群聊中未 @ 机器人的消息被过滤 | 待补：`TestL22_AgentOps` |
 
+Codex 对第 19–22 讲的 review 结论：race、装配、意图过滤均通过；另提出 1 个 P1、2 个问题，已处理：
+- **P1 空判卷脚本自动满分**：`validate` 为空时，`bash -c ""` 返回 0，用例会直接判为通过。现在 `LoadCases` 会拒绝缺 id、重复 id、缺 prompt、缺 validate 的用例；直接调用 `RunSuite` 时 `runOne` 同样拒绝。回归测试为 `TestEmptyValidateRejected`。
+- **Trace 文件名可能冲突**：同会话同一毫秒导出时会互相覆盖，且 Perfetto 写入失败会被静默忽略。现在文件名追加随机后缀并以 `O_EXCL` 创建，写入失败会返回错误；Trace 路径改由引擎回传，不再靠 glob 查找。回归测试为 `TestExportNoOverwrite`。
+- **P2 设计边界**：Benchmark 的 Setup/Validate 直接用宿主机 bash 执行，没有 OS 沙箱，用例文件必须可信。严格隔离需要容器（参见"已知限制"）。
+
 **真实模型验证受阻**：本机可用的方舟 key（月/周额度）和 MiniMax key（Token Plan）都已用尽。方舟最早在 09-28 重置周额度，月额度要到 10-08。额度恢复或换一个可用的 key 后，执行 `make live RUN='L19|L22'` 和 `make bench` 即可补齐。
 
 ## 3. 本地部署验证
@@ -112,6 +117,7 @@ Codex review（HEAD=6ec768c）共提出 5 个问题，均已修复，并补了�
 
 - 权限规则基于正则，不理解 shell 引号：`grep -r 'rm -rf' docs` 也会触发审批，属于误报，没有漏放。
 - 审批只能防模型"犯错"，防不住同机上蓄意对抗的模型：YOLO 模式下的 bash 本来就能直接调用系统命令。真正的隔离需要沙箱或容器（课程第 16 讲的观点）。
+- Benchmark 的 Setup/Validate 直接在宿主机 bash 执行，没有沙箱隔离：`bench/cases.json` 属于可信输入，不要跑来源不明的用例集。
 - 只读守卫同样靠正则识别写操作，只用来缩小子智能体的爆炸半径，不能当作安全沙箱。本地 YOLO 场景应配合容器或沙箱使用（课程第 16 讲的观点）。
 - Session 的累计成本只保存在内存里，服务重启后清零；历史消息会持久化。
 - HTTP `/v1/chat` 是同步接口：客户端断开会取消这次任务。

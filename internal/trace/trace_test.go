@@ -67,3 +67,25 @@ func TestTreeAndExport(t *testing.T) {
 	nilSpan.Set("x", 1)
 	nilSpan.End()
 }
+
+func TestExportNoOverwrite(t *testing.T) {
+	_, root := Start(context.Background(), "Agent.Run")
+	root.End()
+	dir := t.TempDir()
+	seen := map[string]bool{}
+	for i := 0; i < 20; i++ { // 同一个根 Span（同会话同毫秒）重复导出
+		p, err := Export(root, dir, "s")
+		if err != nil || seen[p] {
+			t.Fatalf("覆盖或失败: %v %s", err, p)
+		}
+		seen[p] = true
+	}
+	if files, _ := filepath.Glob(filepath.Join(dir, "*.perfetto.json")); len(files) != 20 {
+		t.Fatalf("perfetto 文件数 %d", len(files))
+	}
+	ro := filepath.Join(dir, "ro")
+	os.Mkdir(ro, 0o500)
+	if _, err := Export(root, ro, "s"); err == nil {
+		t.Fatal("不可写目录应返回错误而不是静默丢弃")
+	}
+}

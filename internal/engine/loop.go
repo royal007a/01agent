@@ -225,7 +225,11 @@ func (e *AgentEngine) exportTrace(root *trace.Span, session *ctxpkg.Session) {
 	if dir == "" {
 		dir = filepath.Join(session.WorkDir, ".claw", "traces")
 	}
-	if path, err := trace.Export(root, dir, session.ID); err != nil {
+	path, err := trace.Export(root, dir, session.ID)
+	if path != "" {
+		root.Set("trace_path", path) // 仅供进程内回调读取（文件已写完，不会进入导出内容）
+	}
+	if err != nil {
 		log.Printf("[Tracing] 导出失败: %v", err)
 	} else {
 		log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存: %s（*.perfetto.json 可拖进 ui.perfetto.dev 看甘特图）", path)
