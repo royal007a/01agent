@@ -28,9 +28,9 @@ type TestCase struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Tags     []string `json:"tags,omitempty"`
-	Setup    string   `json:"setup,omitempty"`    // Agent 运行前在工作区执行的 bash（初始化靶机）
-	Prompt   string   `json:"prompt"`             // 交给 Agent 的任务
-	Validate string   `json:"validate"`           // 判卷脚本：exit 0 即通过
+	Setup    string   `json:"setup,omitempty"`     // Agent 运行前在工作区执行的 bash（初始化靶机）
+	Prompt   string   `json:"prompt"`              // 交给 Agent 的任务
+	Validate string   `json:"validate"`            // 判卷脚本：exit 0 即通过
 	MaxTurns int      `json:"max_turns,omitempty"` // 超过即失败
 	Thinking bool     `json:"thinking,omitempty"`
 	PlanMode bool     `json:"plan_mode,omitempty"`

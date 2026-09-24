@@ -35,7 +35,9 @@ func (f *fakeSender) all() string {
 	return strings.Join(f.msgs, "\n")
 }
 
-func eventBody(msgID, chatID, text string) string { return eventBodyIn(msgID, chatID, text, "p2p", false) }
+func eventBody(msgID, chatID, text string) string {
+	return eventBodyIn(msgID, chatID, text, "p2p", false)
+}
 
 func eventBodyIn(msgID, chatID, text, chatType string, mention bool) string {
 	content, _ := json.Marshal(map[string]string{"text": text})
@@ -43,7 +45,7 @@ func eventBodyIn(msgID, chatID, text, chatType string, mention bool) string {
 		"schema": "2.0",
 		"header": map[string]any{"event_id": "ev_" + msgID, "token": "vt", "create_time": "1", "event_type": "im.message.receive_v1", "tenant_key": "t", "app_id": "cli_x"},
 		"event": map[string]any{
-			"sender":  map[string]any{"sender_type": "user", "sender_id": map[string]any{"open_id": "ou_1"}},
+			"sender": map[string]any{"sender_type": "user", "sender_id": map[string]any{"open_id": "ou_1"}},
 			"message": func() map[string]any {
 				m := map[string]any{"message_id": msgID, "chat_id": chatID, "chat_type": chatType, "message_type": "text", "content": string(content)}
 				if mention {
