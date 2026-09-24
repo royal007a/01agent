@@ -40,6 +40,17 @@
 
 第 09 讲（飞书）：本机没有专用的飞书应用凭据，因此没有接真实飞书。事件分发、Reporter 输出、审批口令用官方 SDK 的 dispatcher 离线测试覆盖。长连接模式下只需在 `~/.go-tiny-claw/serve.env` 填入凭据即可启用。
 
+### 第 19–22 讲（2026-09-24）
+
+| 讲 | 离线验证 | 真实模型 |
+|---|---|---|
+| 19 Tracing | `trace.TestTreeAndExport`（并发 Span、幂等 End、Perfetto 并行轨道）、`engine.TestTraceTree`（Turn 逐轮结束、子智能体子树、导出两份文件） | 待补：`TestL19_Tracing` |
+| 20 Benchmark | `eval.TestRunSuiteAndReport`（通过/判卷失败/Setup 失败、轨迹指标、成本、失败保留工作区与 Trace、基线回归）；7 道题的判卷脚本都做过正反向校验：初始状态判为失败，参考解判为通过 | 待补：`make bench`（第一次真机跑分因额度耗尽全部 429，未计入） |
+| 21 CLI | `app.Build` 被 CLI、服务端、Benchmark 共用；竞态修复题 t07 的判卷脚本已校验 | 待补：`make bench RUN=t07` |
+| 22 AgentOps | `httpapi.TestAgentOpsScenario`：AGENTS.md 与 Skill 注入，tail 大日志，edit 审批通过后修复配置，`nginx -t` 通过，reload 审批被拒且未执行，导出 Trace；`feishu.TestWebhookFlow` 验证群聊中未 @ 机器人的消息被过滤 | 待补：`TestL22_AgentOps` |
+
+**真实模型验证受阻**：本机可用的方舟 key（月/周额度）和 MiniMax key（Token Plan）都已用尽。方舟最早在 09-28 重置周额度，月额度要到 10-08。额度恢复或换一个可用的 key 后，执行 `make live RUN='L19|L22'` 和 `make bench` 即可补齐。
+
 ## 3. 本地部署验证
 
 `make deploy` 后，launchd 服务 `com.weberzhao.go-tiny-claw` 常驻在 `127.0.0.1:48080`：
