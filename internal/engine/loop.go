@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -47,6 +48,9 @@ type AgentEngine struct {
 	MaxTurns int
 	// TraceDir 链路追踪导出目录（第 19 讲）；为空时写入 <工作区>/.claw/traces，为 "-" 时不导出。
 	TraceDir string
+	// EarlyExitNudges 防早退（第 02 讲作者答疑提到的"完成度校验"）：模型只说了"我将…/让我…"
+	// 却没有真正调用工具就结束时，最多再推它几次（0 关闭）。弱模型（如本地 7B）常见这种"光说不练"。
+	EarlyExitNudges int
 	// OnRunFinished 每次 Run 结束时回调根 Span（Benchmark 用它统计轮数、工具失败等轨迹指标）。
 	OnRunFinished func(root *trace.Span)
 	compactor     *ctxpkg.Compactor
@@ -62,6 +66,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 		PlanMode:           planMode,
 		WorkingMemoryLimit: 20,
 		MaxTurns:           60,
+		EarlyExitNudges:    2,
 		compactor:          ctxpkg.NewCompactor(20000, 6),
 		recovery:           ctxpkg.NewRecoveryManager(),
 		injector:           NewReminderInjector(),
@@ -107,6 +112,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
 	systemMsg := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode).Build()
 
+	nudges := 0
 	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -121,8 +127,18 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		root.Set("turns", turn)
 		done, err := e.runTurn(turnCtx, turnSpan, session, systemMsg, reporter)
 		turnSpan.End() // 课程在 for 循环里 defer，所有 Turn 都要等 Run 结束才关闭，耗时全错；这里逐轮结束
-		if err != nil || done {
+		if err != nil {
 			return err
+		}
+		if done {
+			if nudges < e.EarlyExitNudges && announcesUnfinishedAction(session) {
+				nudges++
+				root.Add("early_exit_nudges", 1)
+				log.Printf("[Engine] ⚠️ 模型宣布要行动却没有调用工具，注入防早退提醒 (%d/%d)", nudges, e.EarlyExitNudges)
+				session.Append(schema.Message{Role: schema.RoleUser, Content: earlyExitNudge})
+				continue
+			}
+			return nil
 		}
 	}
 }
@@ -170,6 +186,13 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 	if err != nil {
 		return false, fmt.Errorf("Action 阶段生成失败: %w", err)
 	}
+	if len(actionResp.ToolCalls) == 0 {
+		if calls := recoverTextToolCalls(actionResp.Content, availableTools); len(calls) > 0 {
+			log.Printf("[Engine] 🔧 从正文中还原出 %d 个工具调用（模型没走结构化 tool_calls）", len(calls))
+			actionResp.ToolCalls = calls
+			turnSpan.Set("text_tool_calls_recovered", len(calls))
+		}
+	}
 	// 第 13/14 讲的 1214 修复：把思考与行动合并为一条合法的 Assistant 消息写入 Session，
 	// 避免出现连续两条 assistant、或 assistant(思考) 之后紧跟 tool 消息的非法序列。
 	final := *actionResp
@@ -199,6 +222,24 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		reporter.OnMessage(ctx, "⚠️ 检测到重复失败，已注入 System Reminder 干预。")
 	}
 	return false, nil
+}
+
+const earlyExitNudge = "[系统提醒] 你上一条回复说要去执行某个操作，但并没有真正调用任何工具，任务因此停住了。如果任务还没完成，请现在直接发起工具调用；如果已经完成，请直接给出最终结论。"
+
+// intentRe 第一人称"将要行动"的表述，出现在结尾段落且没有工具调用，通常意味着模型在"光说不练"。
+var intentRe = regexp.MustCompile(`(我将|我会|让我|我来|我先|我需要先|首先[，,]?我|接下来[，,]?我|下一步[，,]?我|现在[，,]?我|I will|I'll|Let me|I'm going to)`)
+
+func announcesUnfinishedAction(session *ctxpkg.Session) bool {
+	h := session.GetWorkingMemory(1)
+	if len(h) == 0 || h[0].Role != schema.RoleAssistant || len(h[0].ToolCalls) > 0 {
+		return false
+	}
+	c := strings.TrimSpace(h[0].Content)
+	if c == "" {
+		return true // 空回复也是早退
+	}
+	// 只看最后 200 字节：最终总结里偶尔出现的"我会…"不算
+	return intentRe.MatchString(textutil.Tail(c, 200))
 }
 
 // endLLMSpan 记录一次模型调用的结果概要。

@@ -291,3 +291,54 @@ func TestTraceTree(t *testing.T) {
 		t.Fatalf("应导出决策树与 perfetto 两个文件: %v", files)
 	}
 }
+
+// lazyProvider：第一次只"宣布要做"，被提醒后才真正调用工具。
+type lazyProvider struct{ calls int }
+
+func (l *lazyProvider) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	l.calls++
+	last := msgs[len(msgs)-1]
+	switch {
+	case last.IsToolResult():
+		return &schema.Message{Role: schema.RoleAssistant, Content: "已完成，结果: " + last.Content}, nil
+	case strings.Contains(last.Content, "[系统提醒]"):
+		return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "x", Name: "bash", Arguments: []byte(`{"command":"echo hi"}`)}}}, nil
+	default:
+		return &schema.Message{Role: schema.RoleAssistant, Content: "好的，首先我将检查 error.log 文件。"}, nil
+	}
+}
+
+func TestEarlyExitNudge(t *testing.T) {
+	r := tools.NewRegistry()
+	r.Register(tools.NewBashTool(t.TempDir()))
+	p := &lazyProvider{}
+	sess := ctxpkg.NewSession("t", t.TempDir())
+	if err := NewAgentEngine(p, r, false, false).Chat(context.Background(), sess, "查日志", nil); err != nil {
+		t.Fatal(err)
+	}
+	h := sess.History()
+	if !strings.Contains(h[len(h)-1].Content, "已完成，结果: hi") {
+		t.Fatalf("防早退后应真正执行工具: %#v", h[len(h)-1])
+	}
+	// 永远只说不做的模型：最多提醒 EarlyExitNudges 次后正常结束，不会死循环
+	stub := &stubbornTalker{}
+	eng := NewAgentEngine(stub, r, false, false)
+	if err := eng.Chat(context.Background(), ctxpkg.NewSession("t2", t.TempDir()), "x", nil); err != nil || stub.n != 1+eng.EarlyExitNudges {
+		t.Fatalf("n=%d err=%v", stub.n, err)
+	}
+	// 正常的最终答复不应被误判
+	if announcesUnfinishedAction(func() *ctxpkg.Session {
+		s := ctxpkg.NewSession("x", "")
+		s.Append(schema.Message{Role: schema.RoleAssistant, Content: "修复完成：已将 locat 改为 location，nginx -t 通过。"})
+		return s
+	}()) {
+		t.Fatal("最终答复被误判为早退")
+	}
+}
+
+type stubbornTalker struct{ n int }
+
+func (s *stubbornTalker) Generate(context.Context, []schema.Message, []schema.ToolDefinition) (*schema.Message, error) {
+	s.n++
+	return &schema.Message{Role: schema.RoleAssistant, Content: "让我先看看。"}, nil
+}
