@@ -13,6 +13,7 @@ import (
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
+	"github.com/weberzhao/go-tiny-claw/internal/trace"
 )
 
 // scriptedProvider 模拟第 03 讲的升级版 Mock：tools 为空时是 Thinking，否则是 Action。
@@ -249,5 +250,44 @@ func TestDoomLoopBreaker(t *testing.T) {
 	}
 	if !strings.Contains(sess.History()[len(sess.History())-1].Content, "需要人工帮助") {
 		t.Fatal("熔断后模型应收手")
+	}
+}
+
+// 第 19 讲：Trace 树结构、逐轮结束、子智能体子树与导出文件。
+func TestTraceTree(t *testing.T) {
+	wd := t.TempDir()
+	os.MkdirAll(filepath.Join(wd, "legacy"), 0o755)
+	os.WriteFile(filepath.Join(wd, "legacy/config.txt"), []byte("核心密码是: pw_42"), 0o644)
+	main := tools.NewRegistry()
+	ro := tools.NewRegistry()
+	ro.Register(tools.NewBashTool(wd))
+	eng := NewAgentEngine(subProvider{}, main, false, false)
+	main.Register(tools.NewSubagentTool(eng, ro))
+	var root *trace.Span
+	eng.OnRunFinished = func(r *trace.Span) { root = r }
+	if err := eng.Chat(context.Background(), ctxpkg.NewSession("trace-t", wd), "找密码", nil); err != nil {
+		t.Fatal(err)
+	}
+	if root == nil || root.Name != "Agent.Run" || root.Get("turns") != 2 {
+		t.Fatalf("根 Span 异常: %+v", root)
+	}
+	if root.Count("Turn-1") != 1 || root.Count("Subagent.Run") != 2 || root.Count("LLM.Action") != 2+4 {
+		t.Fatalf("树结构: turns=%d sub=%d llm=%d", root.Count("Turn-1"), root.Count("Subagent.Run"), root.Count("LLM.Action"))
+	}
+	var turn1End, turn2Start time.Time
+	root.Walk(func(sp *trace.Span, depth int) {
+		if sp.Name == "Turn-1" {
+			turn1End = sp.EndTime
+		}
+		if sp.Name == "Turn-2" {
+			turn2Start = sp.StartTime
+		}
+	})
+	if turn1End.IsZero() || turn1End.After(turn2Start) {
+		t.Fatal("Turn Span 应在下一轮开始前结束")
+	}
+	files, _ := filepath.Glob(filepath.Join(wd, ".claw/traces/trace_trace-t_*"))
+	if len(files) != 2 {
+		t.Fatalf("应导出决策树与 perfetto 两个文件: %v", files)
 	}
 }

@@ -2,7 +2,7 @@ BIN      ?= $(HOME)/.local/bin/claw
 PLIST    ?= $(HOME)/Library/LaunchAgents/com.weberzhao.go-tiny-claw.plist
 LABEL    := com.weberzhao.go-tiny-claw
 
-.PHONY: build test live install deploy undeploy status logs
+.PHONY: build test live bench agentops-demo install deploy undeploy status logs
 
 build:
 	go build -o claw ./cmd/claw
@@ -13,6 +13,14 @@ test:
 # 真实模型逐讲复现：make live RUN=L12  PROTO=openai|claude
 live:
 	bash -c 'source scripts/env.sh $(or $(PROTO),openai) && go test -tags live ./internal/e2e -v -timeout 90m -run "$(or $(RUN),L)"'
+
+# 第 20 讲：自动化跑分 make bench [RUN=t0[1-3]] [PROTO=claude] [BASELINE=bench/reports/openai/latest.json]
+bench:
+	bash -c 'source scripts/env.sh $(or $(PROTO),openai) && go run ./cmd/bench -j 3 -out bench/reports/$(or $(PROTO),openai) $(if $(RUN),-run "$(RUN)") $(if $(BASELINE),-baseline $(BASELINE))'
+
+# 第 22 讲：AgentOps 演示工作区（坏 nginx.conf + 大日志 + 运维 Skill + 审批规则 + 假 nginx）
+agentops-demo:
+	bash deploy/agentops/setup-demo.sh $(HOME)/.go-tiny-claw/agentops
 
 install:
 	go build -trimpath -o $(BIN) ./cmd/claw

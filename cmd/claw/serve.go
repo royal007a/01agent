@@ -69,6 +69,8 @@ func serve(args []string) {
 			func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
 				return a.eng.Chat(ctx, sessions.GetOrCreate("feishu_"+chatID, a.workDir), prompt, r)
 			})
+		// 第 22 讲思考题：群聊只响应 @ 机器人的消息（可用 FEISHU_BOT_OPEN_ID 精确到本机器人）
+		bot.BotOpenID = os.Getenv("FEISHU_BOT_OPEN_ID")
 		// 第 16 讲：高危命令挂起 → 飞书审批 → 唤醒
 		bot.Approvals = approvals
 		bot.UseCommand(feishu.ApprovalCommand(approvals, bot.Sender()))

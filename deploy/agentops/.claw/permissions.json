@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {"tool": "write_file", "pattern": ".*", "action": "ask"},
+    {"tool": "edit_file",  "pattern": ".*", "action": "ask"},
+    {"tool": "bash", "pattern": "\\bnginx\\s+-s\\b", "action": "ask"},
+    {"tool": "bash", "pattern": "\\b(systemctl|service)\\s+", "action": "ask"},
+    {"tool": "bash", "pattern": "\\b(kill|pkill|killall)\\b", "action": "ask"},
+    {"tool": "bash", "pattern": "\\bsed\\b[^|;&]*\\s-[a-zA-Z]*i", "action": "deny"}
+  ]
+}

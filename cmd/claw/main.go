@@ -7,17 +7,17 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	clawapp "github.com/weberzhao/go-tiny-claw/internal/app"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/observability"
-	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
-	"github.com/weberzhao/go-tiny-claw/internal/tools"
 )
 
 func defaultStateDir() string {
@@ -28,48 +28,19 @@ func defaultStateDir() string {
 	return filepath.Join(home, ".go-tiny-claw")
 }
 
-// app 聚合一次组装出来的所有组件。
+// app 是 internal/app.App 的本地别名，保持入口代码简短。
 type app struct {
 	eng     *engine.AgentEngine
 	workDir string
 	stats   *observability.Stats
 }
 
-// buildEngine 像拼乐高一样组装 Harness：Provider(+Tracker) / Registry(+权限中间件+计时) / Subagent。
 func buildEngine(workDir string, thinking, planMode bool) *app {
-	cfg := provider.ConfigFromEnv()
-	p, err := provider.New(cfg)
+	a, err := clawapp.Build(clawapp.Options{WorkDir: workDir, Thinking: thinking, PlanMode: planMode, Provider: provider.ConfigFromEnv()})
 	if err != nil {
 		log.Fatal(err)
 	}
-	wd, _ := filepath.Abs(workDir)
-	if err := os.MkdirAll(wd, 0o755); err != nil {
-		log.Fatal(err)
-	}
-	// 第 18 讲：用 CostTracker 装饰真实 Provider，引擎毫不知情
-	tracker := observability.NewCostTracker(p, cfg.Model, nil)
-
-	base := tools.NewRegistry()
-	base.Register(tools.NewReadFileTool(wd))
-	base.Register(tools.NewWriteFileTool(wd))
-	base.Register(tools.NewBashTool(wd))
-	base.Register(tools.NewEditFileTool(wd))
-	// 第 16 讲：allow/ask/deny 权限中间件，工作区 .claw/permissions.json 可热加载自定义规则
-	policy := permission.NewPolicy(filepath.Join(wd, ".claw", "permissions.json"))
-	base.Use(permission.Middleware(policy))
-	registry := observability.NewTimedRegistry(base, tracker.Stats)
-
-	eng := engine.NewAgentEngine(tracker, registry, thinking, planMode)
-
-	// 第 17 讲：只读的子智能体兵器库（read_file + 只读 bash），挂成主 Agent 的一个普通工具
-	readOnly := tools.NewRegistry()
-	readOnly.Register(tools.NewReadFileTool(wd))
-	readOnly.Register(tools.NewBashTool(wd))
-	readOnly.Use(tools.ReadOnlyGuard())
-	readOnly.Use(permission.Middleware(policy)) // 守卫漏掉的高危命令仍需审批/受 deny 规则约束
-	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
-
-	return &app{eng: eng, workDir: wd, stats: tracker.Stats}
+	return &app{eng: a.Engine, workDir: a.WorkDir, stats: a.Stats}
 }
 
 func printReport(sess *ctxpkg.Session, st *observability.Stats) {
@@ -92,6 +63,7 @@ func main() {
 	prompt := flag.String("prompt", "", "交给 Agent 的任务")
 	thinking := flag.Bool("thinking", false, "开启慢思考")
 	workDir := flag.String("workdir", ".", "工作区目录")
+	flag.StringVar(workDir, "dir", ".", "工作区目录（-workdir 的别名，第 21 讲）")
 	planMode := flag.Bool("plan", false, "开启 Plan Mode（PLAN.md/TODO.md 状态外部化）")
 	sessionID := flag.String("session", "", "会话 ID；设置后历史以 JSONL 持久化，可跨进程续聊")
 	yes := flag.Bool("yes", false, "自动批准高危操作（仅建议在沙箱中使用）")
@@ -102,6 +74,13 @@ func main() {
 	}
 	a := buildEngine(*workDir, *thinking, *planMode)
 	a.eng.MaxTurns = *maxTurns
+	fmt.Println("==================================================")
+	fmt.Println("🚀 启动 go-tiny-claw CLI 引擎...")
+	fmt.Printf("📁 锁定工作区: %s\n", a.workDir)
+	fmt.Printf("🧠 慢思考: %v | 📋 Plan Mode: %v | ⛔ 最大轮数: %d\n", *thinking, *planMode, *maxTurns)
+	fmt.Println("==================================================")
+	fmt.Printf("\n🎯 收到任务: %s\n\n", *prompt)
+	started := time.Now()
 	mgr := ctxpkg.GlobalSessionMgr
 	id := *sessionID
 	if id != "" {
@@ -114,6 +93,7 @@ func main() {
 	reporter.AutoApprove = *yes
 	err := a.eng.Chat(context.Background(), sess, *prompt, reporter)
 	printReport(sess, a.stats)
+	fmt.Printf("\n✨ 任务结束，总耗时 %v；执行回放见 %s\n", time.Since(started).Round(time.Millisecond), filepath.Join(a.workDir, ".claw", "traces"))
 	if err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}

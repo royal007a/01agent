@@ -10,6 +10,7 @@ import (
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
+	"github.com/weberzhao/go-tiny-claw/internal/trace"
 )
 
 // MaxSubTurns 子智能体最多跑多少个 Turn，防止它自己卡死。
@@ -60,6 +61,9 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, registry to
 	}
 	reporter := prefixReporter{Reporter: parent, prefix: "[Subagent] "}
 	ctx = runctx.WithReporter(ctx, reporter)
+	ctx, span := trace.Start(ctx, "Subagent.Run") // 挂在父 Trace 的 Tool.Execute(spawn_subagent) 之下
+	span.Set("task_prompt", textutil.Truncate(taskPrompt, 300, "..."))
+	defer span.End()
 
 	history := []schema.Message{
 		{Role: schema.RoleSystem, Content: explorerPrompt},
@@ -71,7 +75,10 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, registry to
 			return "", err
 		}
 		// 子任务要求急速响应：不做慢思考，直接预测行动；只能看到受限注册表
-		resp, err := e.provider.Generate(ctx, e.compactor.Compact(history), registry.GetAvailableTools())
+		span.Set("turns", turn)
+		llmCtx, llmSpan := trace.Start(ctx, "LLM.Action")
+		resp, err := e.provider.Generate(llmCtx, e.compactor.Compact(history), registry.GetAvailableTools())
+		endLLMSpan(llmSpan, resp, err)
 		if err != nil {
 			return "", fmt.Errorf("子智能体推理失败: %w", err)
 		}

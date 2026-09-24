@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# 本地演示用的"假 nginx"：只模拟 -t（校验配置）与 -s reload（记录重载），不需要真的安装 nginx。
+conf="${NGINX_CONF:-$PWD/nginx.conf}"
+case "$1" in
+  -t)
+    if grep -qE '^\s*locat\s' "$conf"; then
+      echo "nginx: [emerg] unknown directive \"locat\" in $conf:5"; echo "nginx: configuration file $conf test failed"; exit 1
+    fi
+    echo "nginx: the configuration file $conf syntax is ok"; echo "nginx: configuration file $conf test is successful" ;;
+  -s)
+    date "+%F %T reload" >> "$PWD/.nginx_reloaded"; echo "nginx: signal $2 sent" ;;
+  *) echo "usage: nginx -t | -s reload"; exit 2 ;;
+esac

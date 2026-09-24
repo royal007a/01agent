@@ -3,3 +3,5 @@
 /workspace/
 .env*
 *.log
+
+/bench/reports/

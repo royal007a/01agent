@@ -1,4 +1,4 @@
-# go-tiny-claw 实现总结（《从 0 开始构建 Agent Harness》第 02–18 讲）
+# go-tiny-claw 实现总结（《从 0 开始构建 Agent Harness》第 02–22 讲）
 
 > 课程：极客时间《从 0 开始构建 Agent Harness》（Tony Bai），源 PDF 位于 `~/Downloads/从 0 开始构建 Agent Harness/`。
 > 本仓库按讲次逐段实现、逐段验证（git 历史即实现顺序），并在真实模型（火山方舟 `doubao-seed-evolving`，OpenAI 与 Anthropic 双协议）上复现了每一讲的实战场景。
@@ -54,6 +54,10 @@ Session.Append(assistant, observations, reminder?) <─────────�
 | 16 | Middleware 与审批 | Registry.Use 中间件链；allow/ask/deny 策略（deny>ask>allow，`.claw/permissions.json` 热加载）；ask 时通过 ctx 找到当前 Reporter 走飞书/终端/HTTP 审批，无通道则 fail-closed | `tools/registry.go`, `permission/*`, `feishu/approval.go` |
 | 17 | Subagent | `spawn_subagent` 就是一个普通工具：`RunSub` 拉起上下文隔离的一次性子循环（≤10 轮），只拿只读注册表 + 只读 bash 守卫；多个子智能体可并行 | `tools/subagent.go`, `engine/subagent.go`, `tools/readonly_guard.go` |
 | 18 | 成本追踪 | `CostTracker` 装饰 Provider（按 ctx 中的会话记账）；`TimedRegistry` 装饰 Registry 记录工具本地耗时（思考题）；`/metrics` | `observability/tracker.go` |
+| 19 | Tracing | `internal/trace`：借助 ctx 自动挂接父子 Span（Agent.Run → Turn-N → LLM.Thinking/LLM.Action/Tool.Execute → Subagent.Run）；导出嵌套 JSON 决策树 + Perfetto/Chrome Trace 甘特图（思考题）；Turn 逐轮结束（修正课程 defer 在循环里导致耗时全错） | `trace/trace.go`, `engine/loop.go` |
+| 20 | Benchmark | `internal/eval` + `cmd/bench`：Setup → Agent → 验证脚本判卷（Fail-to-Pass），隔离工作区并发跑；轨迹指标（轮数、工具失败、自愈提示、Reminder、一发入魂，思考题）；Markdown/JSON 报告与基线回归检测（exit 2，可接 CI）；`bench/cases.json` 7 道题，判卷脚本均做过正反向校验 | `eval/benchmark.go`, `cmd/bench` |
+| 21 | CLI 串讲 | `internal/app.Build` 统一装配（CLI/服务端/Benchmark 共用）；CLI 支持 `-dir`、横幅、财务报表与 Trace 路径；并发竞态修复作为 Benchmark 用例 t07（Plan Mode） | `app/app.go`, `cmd/claw` |
+| 22 | AgentOps | `deploy/agentops`：运维 AGENTS.md + ops_troubleshoot Skill + 权限规则（write/edit/nginx -s/systemctl/kill 需审批，sed -i 禁止）+ 故障现场脚本 + 假 nginx；飞书群聊意图过滤（未 @ 机器人不唤醒，思考题）；离线全链路测试 `TestAgentOpsScenario` | `deploy/agentops/*`, `feishu/bot.go` |
 
 ## 3. 使用
 
@@ -65,6 +69,8 @@ go run ./cmd/claw -workdir /tmp/ws -prompt "读取 hello.txt 并总结"      # �
 go run ./cmd/claw -workdir /tmp/ws -thinking -plan -session demo -prompt "搭一个 Go Web Server"   # 慢思考 + Plan Mode + 可续聊
 go run ./cmd/claw -yes ...                                               # 沙箱中自动批准高危操作
 
+make bench         # 第 20 讲自动化跑分（bench/cases.json，报告在 bench/reports/）
+make agentops-demo # 第 22 讲运维演示工作区
 make test          # 单元/集成测试（离线，含飞书 webhook、审批、子智能体、HTTP API）
 make live RUN=L12  # 用真实模型复现某一讲的实战场景（internal/e2e，build tag live）
 ```

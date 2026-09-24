@@ -72,6 +72,11 @@ type FeishuBot struct {
 	seen   map[string]struct{}
 	order  []string
 	wg     sync.WaitGroup
+	// AllowUnmentionedGroup 为 false（默认）时，群聊里没有 @ 机器人的消息一律忽略（第 22 讲思考题：意图过滤）。
+	// 放在 Dispatcher 接收层最便宜：零 Token 成本、零延迟，闲聊根本不会唤醒 Main Loop。
+	AllowUnmentionedGroup bool
+	// BotOpenID 非空时，群聊里必须 @ 的是本机器人（而不是随便 @ 了某个人）。
+	BotOpenID string
 	// Approvals 非空时，每个会话的 Reporter 都具备人工审批能力。
 	Approvals *permission.ApprovalManager
 }
@@ -178,6 +183,9 @@ func (b *FeishuBot) EventDispatcher(verifyToken, encryptKey string) *dispatcher.
 			if s := event.Event.Sender; s != nil && s.SenderType != nil && *s.SenderType != "user" {
 				return nil // 忽略机器人自己/其他机器人的消息，防止回环
 			}
+			if !b.AllowUnmentionedGroup && strOr(msg.ChatType) == "group" && !b.mentioned(msg.Mentions) {
+				return nil // 群聊闲聊，未 @ 机器人：不唤醒 Agent
+			}
 			if msg.MessageType != nil && *msg.MessageType != "text" {
 				_ = b.sender.SendText(ctx, *msg.ChatId, "目前只支持纯文本指令。")
 				return nil
@@ -192,6 +200,18 @@ func (b *FeishuBot) EventDispatcher(verifyToken, encryptKey string) *dispatcher.
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil // 已读事件静默忽略
 		})
+}
+
+func (b *FeishuBot) mentioned(ms []*larkim.MentionEvent) bool {
+	for _, m := range ms {
+		if b.BotOpenID == "" {
+			return true
+		}
+		if m != nil && m.Id != nil && strOr(m.Id.OpenId) == b.BotOpenID {
+			return true
+		}
+	}
+	return false
 }
 
 func strOr(p *string) string {

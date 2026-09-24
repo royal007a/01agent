@@ -1,0 +1,78 @@
+package eval
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/weberzhao/go-tiny-claw/internal/provider"
+	"github.com/weberzhao/go-tiny-claw/internal/schema"
+)
+
+// scripted：先读一个不存在的文件（制造一次工具报错），再写 answer.txt，然后收工。
+type scripted struct{}
+
+func (scripted) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	n := 0
+	for _, m := range msgs {
+		if m.IsToolResult() {
+			n++
+		}
+	}
+	u := &schema.Usage{PromptTokens: 100, CompletionTokens: 10}
+	switch n {
+	case 0:
+		return &schema.Message{Role: schema.RoleAssistant, Usage: u, ToolCalls: []schema.ToolCall{{ID: "1", Name: "read_file", Arguments: []byte(`{"path":"nope.txt"}`)}}}, nil
+	case 1:
+		return &schema.Message{Role: schema.RoleAssistant, Usage: u, ToolCalls: []schema.ToolCall{{ID: "2", Name: "write_file", Arguments: []byte(`{"path":"answer.txt","content":"42"}`)}}}, nil
+	default:
+		return &schema.Message{Role: schema.RoleAssistant, Usage: u, Content: "done"}, nil
+	}
+}
+
+func TestRunSuiteAndReport(t *testing.T) {
+	t.Setenv("CLAW_PRICE_IN", "1")
+	t.Setenv("CLAW_PRICE_OUT", "1")
+	r := &Runner{Provider: provider.Config{Model: "fake", Kind: "openai"}, LLM: scripted{}, WorkRoot: t.TempDir(), Parallelism: 2}
+	cases := []TestCase{
+		{ID: "ok", Name: "写答案", Setup: "echo seed > seed.txt", Prompt: "写 42", Validate: `[ "$(cat answer.txt)" = 42 ] && test -f seed.txt`},
+		{ID: "bad", Name: "判卷失败", Prompt: "写 43", Validate: `[ "$(cat answer.txt)" = 43 ]`},
+		{ID: "setupfail", Name: "靶机失败", Setup: "exit 3", Prompt: "x", Validate: "true"},
+	}
+	rep := r.RunSuite(context.Background(), cases)
+	if rep.Total != 3 || rep.Passed != 1 {
+		t.Fatalf("passed=%d", rep.Passed)
+	}
+	ok := rep.Results[0]
+	if !ok.Passed || ok.Turns != 3 || ok.ToolCalls != 2 || ok.ToolErrors != 1 || ok.RecoveryHints != 1 || ok.FirstTry || ok.LLMCalls != 3 {
+		t.Fatalf("轨迹指标错误: %+v", ok)
+	}
+	if ok.PromptTokens != 300 || ok.CostCNY <= 0 || ok.WorkDir != "" {
+		t.Fatalf("成本或清理错误: %+v", ok)
+	}
+	if bad := rep.Results[1]; bad.Passed || !strings.Contains(bad.Error, "验证脚本未通过") || bad.WorkDir == "" || bad.TracePath == "" {
+		t.Fatalf("失败用例应保留工作区与 trace: %+v", bad)
+	}
+	if !strings.Contains(rep.Results[2].Error, "Setup 失败") {
+		t.Fatal(rep.Results[2].Error)
+	}
+	baseline := rep
+	baseline.Results = append([]Result(nil), rep.Results...)
+	baseline.Results[1].Passed = true
+	md := rep.Markdown(&baseline)
+	for _, want := range []string{"1/3", "⚠️ 回归", "| ok | ✅ | 3 | 2(1) | 1 |"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("报告缺少 %q:\n%s", want, md)
+		}
+	}
+	if reg := rep.Regressions(baseline); len(reg) != 1 || reg[0] != "bad" {
+		t.Fatal(reg)
+	}
+}
+
+func TestLoadCases(t *testing.T) {
+	cs, err := LoadCases("../../bench/cases.json", "^t0[12]")
+	if err != nil || len(cs) != 2 || cs[0].Validate == "" {
+		t.Fatal(cs, err)
+	}
+}

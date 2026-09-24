@@ -35,14 +35,22 @@ func (f *fakeSender) all() string {
 	return strings.Join(f.msgs, "\n")
 }
 
-func eventBody(msgID, chatID, text string) string {
+func eventBody(msgID, chatID, text string) string { return eventBodyIn(msgID, chatID, text, "p2p", false) }
+
+func eventBodyIn(msgID, chatID, text, chatType string, mention bool) string {
 	content, _ := json.Marshal(map[string]string{"text": text})
 	ev := map[string]any{
 		"schema": "2.0",
 		"header": map[string]any{"event_id": "ev_" + msgID, "token": "vt", "create_time": "1", "event_type": "im.message.receive_v1", "tenant_key": "t", "app_id": "cli_x"},
 		"event": map[string]any{
 			"sender":  map[string]any{"sender_type": "user", "sender_id": map[string]any{"open_id": "ou_1"}},
-			"message": map[string]any{"message_id": msgID, "chat_id": chatID, "chat_type": "p2p", "message_type": "text", "content": string(content)},
+			"message": func() map[string]any {
+				m := map[string]any{"message_id": msgID, "chat_id": chatID, "chat_type": chatType, "message_type": "text", "content": string(content)}
+				if mention {
+					m["mentions"] = []any{map[string]any{"key": "@_user_1", "name": "claw", "id": map[string]any{"open_id": "ou_bot"}}}
+				}
+				return m
+			}(),
 		},
 	}
 	b, _ := json.Marshal(ev)
@@ -80,6 +88,8 @@ func TestWebhookFlow(t *testing.T) {
 		eventBody("om_1", "oc_A", "@_user_1 帮我看 README"),
 		eventBody("om_1", "oc_A", "@_user_1 帮我看 README"),
 		eventBody("om_2", "oc_B", "查一下 IP"),
+		eventBodyIn("om_3", "oc_G", "今天中午吃什么？", "group", false), // 群聊闲聊：不唤醒
+		eventBodyIn("om_4", "oc_G", "@_user_1 看下磁盘", "group", true),
 	} {
 		resp, err := http.Post(srv.URL, "application/json", strings.NewReader(body))
 		if err != nil || resp.StatusCode != 200 {
@@ -87,8 +97,11 @@ func TestWebhookFlow(t *testing.T) {
 		}
 	}
 	bot.Wait()
-	if len(prompts) != 2 {
-		t.Fatalf("重复事件应去重，got %v", prompts)
+	if len(prompts) != 3 {
+		t.Fatalf("应只处理 3 条（去重 + 群聊未 @ 过滤），got %v", prompts)
+	}
+	if strings.Contains(strings.Join(prompts, ","), "吃什么") || !strings.Contains(strings.Join(prompts, ","), "oc_G:看下磁盘") {
+		t.Fatalf("意图过滤错误: %v", prompts)
 	}
 	joined := strings.Join(prompts, ",")
 	if !strings.Contains(joined, "oc_A:帮我看 README") || !strings.Contains(joined, "oc_B:查一下 IP") {
