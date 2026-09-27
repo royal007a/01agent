@@ -304,3 +304,156 @@ Trace 现在只有预览，不能回放。回放用单独的 cassette 实现，�
 | 检索写进 Main Loop 还是做成工具 | 工具 + 子智能体 | 不增加 Loop 分支；多轮噪声留在子上下文 |
 | P0 是否上向量检索 | 否（P1） | P0 追求确定性、可回归；bge-m3 已就绪，P1 只是接一个 Retriever 实现 |
 | 近似去重用 SimHash 还是 embedding | P0 用 SimHash/Jaccard，P1 可换成 embedding 相似度 | 不依赖模型，测试稳定 |
+
+---
+
+# 第二轮：Agentic RAG 边界、最小充分检索、端到端性能、预算动态检索与缓存
+
+> 输入：用户第二段材料（Agentic RAG 与迭代式检索的关系、端到端检索性能、最小充分检索、基于预算的动态检索、缓存）以及流程图，外加 mymaccodex 的交接。
+> 流程图：生成 query → 多源多路召回 → 过滤/融合/排序 → 信息是否充分？是 → 退出；否 → 资源是否不足且已达最小充分？是 → 退出；否 → 检索缺失信息，回到生成 query。
+> 说明：第一轮设计稿已提交（`db7e16c`），本节在其基础上增量修订；与第一轮冲突的地方在 §12 列出。
+
+## 7. 边界：迭代式检索（机制） vs Agentic RAG（系统编排）
+
+| 能力 | 归属 | 在 go-tiny-claw 中的位置 | 本期 |
+|---|---|---|---|
+| 根据上一轮结果补充检索、证据账本、停止判定 | 迭代式检索 | `internal/retrieval`（账本、StopEvaluator），`search`/`evidence` 工具 | P0 |
+| 决定查什么（Query 改写、问题拆解） | Agentic RAG | 模型负责；Harness 用 strategy/gap 校验、拒绝重复 Query | P0（校验）|
+| 决定去哪查（数据源、检索方式的选择） | Agentic RAG | 数据源目录 `SourceCatalog`（名称、描述、成本档位、可信度）作为工具描述暴露给模型；模型选择，Harness 按预算截断（§10） | P0 两个源 / P1 扩展 |
+| 调用什么工具、怎么验证证据 | Agentic RAG | 已有：Main Loop + Registry + 子智能体；验证用 `verify`/`counter` 策略加冲突裁决 | 已有 + P0 |
+| 什么时候停 | 两者共有 | 最小充分 gate（§8）+ 预算阶梯（§10）+ StopEvaluator | P0 |
+| 多 Agent 协作规划、外部 API 数据源、LLM 充分性裁判 | Agentic RAG | 不进入当前 Harness | P2 |
+
+结论：go-tiny-claw 本身就是 Agent Harness，Agentic 的"自主决策"由现有 Main Loop 和子智能体承担。本期只补两块：一是迭代式检索机制；二是让自主决策**受约束**的数据源目录和预算阶梯。不另建编排框架，保持第 06 讲的极简原则。
+
+## 8. 最小充分检索：Goal → Gap → Finish gate
+
+目标：不要一上来把用户需求里的所有子任务都展开去查。
+
+- **新增 `Goal` 层**：`Goal{ID, Statement, IndependentValue bool, Status: active|deferred|done, GapIDs}`，`Gap` 归属于某个 Goal。
+- **拆解规则**：模型调用 `evidence.plan_goals`，一次声明全部子目标，并标注每个子目标是否"单独完成就能给用户有意义的结果"（独立价值判断）。Harness 规定：
+  1. 每个检索任务**同时只能有 1 个 active Goal**：取第一个具有独立价值的子目标，其余一律标为 `deferred`；
+  2. 每个 Goal 最多 5 个 Gap，超出时拒绝并提示"先收敛到最小目标"；
+  3. `search` 的 `gap_id` 只要属于 deferred Goal，就拒绝，返回 `{"rejected":"goal_deferred","hint":"先完成当前最小目标"}`。
+- **Finish gate**：active Goal 的全部 Gap 都满足 covered 或 unanswerable，才允许 `evidence.finish`。finish 的返回包括：
+  - 最小回答需要的证据清单；
+  - 用 deferred Goals 生成的"引导追问"（例如："要继续帮你优化这个项目吗？"）。
+
+  用户确认后，下一次唤醒把下一个 Goal 提为 active，账本里已有的证据可以直接复用（§11）。
+- **示例**："分析三个项目哪个最适合放简历，优化它，再生成面试题"：
+  - G1 选项目：active；
+  - G2 优化：deferred；
+  - G3 面试题：deferred。
+
+  本次只为 G1 检索，回答完后引导用户进入 G2。
+- **流程图对应**："资源不足 & 最小充分 → 退出"＝预算触发且 active Goal 已满足 finish gate，则直接回答；预算触发但 finish gate 未满足，则按 §10 进入降级阶梯的最后一档（带不确定性说明回答，或向用户澄清），不再继续扩大检索。
+
+## 9. 端到端 SLO 与观测字段
+
+用户感知的是"多久拿到一个靠谱答案、花了多少成本"，而不是某一次向量查询的耗时。所以 SLO 按端到端链路拆分：
+
+| SLO 维度 | 指标 | 来源 |
+|---|---|---|
+| 首个可用答案耗时 | `ttfa_ms`：从 Chat 开始到最终答复（p50/p95，跑分取整套用例） | Agent.Run Span |
+| 检索延迟 | `retrieval_ms`，并拆到阶段：rewrite / embed / recall（按路） / fuse / rerank / assess | Retrieval.Round 子 Span |
+| 轮次 | LLM 调用次数、工具调用次数、检索轮数、最高到达的阶梯档位 `tier_max` | Trace 计数 |
+| Token/成本 | prompt/completion tokens、cost_cny，另记"检索相关 Token"（search 结果注入量） | CostTracker + Round |
+| 证据覆盖率 | active Goal 的 Gap 覆盖率、重复率、每轮新增证据 | 账本 |
+| 最终答案质量 | 判卷通过率（validate）、gold_facts 命中率；P2 可加 LLM 裁判分 | eval |
+| 复用效率 | cache_hits / cache_misses（按层），以及复用节省的检索耗时 | 缓存层 |
+
+**Trace 字段**：
+- `Agent.Run` 新增：`ttfa_ms, retrieval_ms, generation_ms, tier_max, cache_hits, cache_misses, goals_total, goals_done`。
+- `Retrieval.Round` 新增：`tier, route_ms.{keyword,grep,vector,rerank}, candidates_in, candidates_out, dup_rate, new_evidence, cache, budget_left.{rounds,ms,tokens}`。
+
+**Evaluator**：`eval.Result` 新增：`TTFAMs, RetrievalMs, TierMax, CacheHits, Coverage, GoalsDone`。用例新增可选的 `slo:{max_ttfa_ms,max_cost_cny,min_coverage,max_tier}` 字段。违反 SLO 记为 `slo_violation`：不改变 pass/fail，但会作为一种回归类型参与基线比较（exit 2）。报告增加 p50/p95 TTFA 两列汇总。
+
+## 10. 基于预算的动态检索：升级与降级阶梯
+
+| 档位 | 内容 | 典型成本 | 进入条件 |
+|---|---|---|---|
+| T0 复用 | 命中结果缓存或已有账本证据 | ~0 | 总是先试 |
+| T1 轻量 | 单路召回：精确 token 走 rg，自然语言走 BM25；k=5 | 毫秒级 | 默认起点 |
+| T2 多路 | BM25 + rg 用 RRF 融合；k=10；可加结构化过滤 | 十毫秒级 | T1 评估后新增证据 < 2 或目标 Gap 仍 open |
+| T3 语义 | 加 bge-m3 向量召回（P1），再加重排（P2：本地 reranker 或 LLM 重排） | 百毫秒到秒级 + Token | T2 仍不足，且预算余量 ≥ 50% |
+| T4 澄清/收敛 | 停止检索：用现有证据给出带不确定性说明的回答，或向用户澄清（`needs_clarification`） | 一次模型调用 | 预算余量 < 20%，或 T3 仍不足，或缺口不可检索 |
+
+- **升级**：由 Harness 依据上一轮的评估结果（新增证据、Gap 状态）决定"允许的最高档位"。模型可以在 `mode` 里请求更高档位，超过允许档位的一律截断到允许档位，并在返回中说明原因。**不允许跳过评估直接升到 T3**。
+- **降级**：每轮开始前计算预算余量，取剩余时间、剩余轮次、剩余 Token、剩余可查数据源中最小的那个比例：
+  - 余量 < 50%：禁用 T3，k 减半；
+  - 余量 < 20%：直接进入 T4。
+
+  这对应"简单问题走轻量路径，证据不足再逐步升级；预算不足则主动降级"。
+- 预算来源：
+  - 用例的 `budget` / `slo` 字段；
+  - 服务端按渠道配置（飞书默认 60s，CLI 默认 180s）；
+  - Token 余量从 CostTracker 当前会话实时读取。
+
+## 11. 缓存：分层、键与失效边界
+
+| 层 | 键 | 值 | 失效/版本边界 | 本期 |
+|---|---|---|---|---|
+| L1 检索结果缓存 | `retriever + QueryFP(规范化 Query+filters+sources) + index_version` | 命中的 Chunk ID 与内容哈希列表 | 命中后**逐个 Chunk 复核**：stat 文件 mtime/size 变化时，重新计算该 Chunk 的哈希，不一致就丢弃该条，而不是整条作废；`index_version` 在切块规则或 BM25 参数变化时递增 | P0 |
+| L2 证据复用 | `workspace_id + chunk content hash` | Evidence（片段、来源、版本） | 内容哈希变化即失效。跨会话复用只在同一工作区内，飞书不同群之间**不共享**，避免信息泄漏 | P0（同会话跨轮、跨 Goal）/ P1（跨会话） |
+| L3 Embedding 缓存 | `model + chunk content hash` | 向量 | 内容哈希变化或模型变化即失效 | P1 |
+| L4 答案缓存 | `规范化问题 + corpus_version + model + prompt_version` | 最终回答与证据 ID | `corpus_version`＝已索引文件 (path, size, mtime) 的哈希，或 git HEAD+dirty 哈希；`prompt_version`＝System Prompt（含 AGENTS.md、Skills）的哈希；另设 TTL。**只对显式标记为"稳定问题"的请求启用**，且该请求不能调用过有副作用的工具 | P1（默认关闭）|
+
+- 存储位置：`<CLAW_HOME>/retrieval/cache/`，和账本一样放在工作区之外，采用原子写。每条记录带 `created_at` 和 `index_version`。
+- 可观测：每次命中或未命中都记入 `Retrieval.Round.cache` 和 `Agent.Run.cache_hits`。
+- **cache 与 cassette 的区别**：两者共用同一个键函数，但语义相反。cache 是运行时优化，随版本失效；cassette 是回放用的，键严格、不失效、只在 record/replay 模式启用。**replay 模式下关闭运行时 cache**，保证回放只依赖 cassette，结果确定。
+
+## 12. 与第一轮方案的兼容性、冲突与取舍
+
+| 对象 | 影响 | 处理 |
+|---|---|---|
+| 第一轮 §2.2 "search 必须带 gap_id" | Gap 现在归属 Goal | 仍然必须带 gap_id；新增规则：gap 属于 deferred Goal 时拒绝 |
+| 第一轮 §2.3 `gaps_covered` / `sufficient` | 如果按全部 Gap 判定，会迫使系统展开所有子任务，**与最小充分检索冲突** | 改为**只看 active Goal 的 Gap**；deferred Goal 不参与覆盖率计算，写进 finish 的引导追问 |
+| StopReason | 新增 `minimal_sufficient`（active Goal 满足 finish gate 且预算触发）、`degraded_answer`（T4 带不确定性回答）、`cache_answer`（L4 命中） | StopEvaluator 表驱动扩展 |
+| LedgerStore | 结构增加 Goals，每轮增加 tier、cache、budget_left | 向后兼容：旧账本没有 Goals 时，视为单一 active Goal |
+| Compaction | 临时"检索状态"消息原本只含事实和缺口 | 增加"当前目标 + 已推迟目标（仅标题）+ 剩余预算档位"，仍限制在 1.5KB 以内 |
+| cassette | cache 命中会绕过 retriever | replay 模式关闭 cache；record 模式同时记录 cache 命中与否，保证轨迹一致 |
+| bench | 原有判卷不变 | 新增 `slo`、`goals`、`budget` 可选字段；新增 SLO 回归类型；报告增加 p50/p95 TTFA |
+| 性能口径 | 材料强调"先消除明显浪费" | P0 先做三件事：已有证据不重查（L1/L2）、Query 去重、search 只返回增量。算法优化（重排、向量）放 P1/P2 |
+
+**更新后的 P0**（在第一轮 P0 基础上增量添加，仍然全部可离线验证）：
+1. Goal 层、`evidence.plan_goals`、单一 active Goal 约束、deferred 拒绝、按 active Goal 判定的 Finish gate 与引导追问；
+2. 阶梯 T0–T2 与 T4、预算余量计算与档位截断（T3 为 P1 预留接口）；
+3. L1 检索结果缓存（带 Chunk 复核）、L2 同会话证据复用；
+4. Trace 与 eval 的 SLO 字段、用例 `slo` 字段、SLO 回归判定。
+
+**P1**：
+- T3 向量召回（bge-m3）+ L3 Embedding 缓存；
+- 跨会话 L2 复用；
+- L4 答案缓存（默认关闭）；
+- cassette；
+- 渠道级预算配置。
+
+**P2**：
+- 重排；
+- LLM 充分性裁判；
+- 外部数据源路由。
+
+**新增回归与验收用例**：
+
+| 用例 | 验证点 |
+|---|---|
+| `TestSingleActiveGoal` | 声明 3 个子目标时只有第 1 个具备独立价值的目标为 active；search 指向 deferred Goal 的 gap 被拒绝 |
+| `TestFinishGateActiveGoalOnly` | active Goal 覆盖完成即可 finish，返回中包含 deferred Goals 的引导追问；deferred Goals 不计入覆盖率 |
+| `TestTierEscalation` | T1 新增证据 < 2 时下一轮允许 T2；未经评估请求 T3 被截断，并说明原因 |
+| `TestBudgetDegrade` | 余量 < 50% 时禁用 T3、k 减半；余量 < 20% 时直接进入 T4，StopReason 为 `degraded_answer` 或 `minimal_sufficient` |
+| `TestResultCacheChunkRevalidation` | 命中 L1 后修改其中一个文件：只丢弃该 Chunk，其余复用；`index_version` 变化时整体失效 |
+| `TestEvidenceNotSharedAcrossChats` | 同一工作区的两个飞书会话不复用 L2 证据 |
+| `TestReplayDisablesCache` | replay 模式下 cache 命中数为 0，结果与 cassette 完全一致 |
+| `TestSLOFieldsAndRegression` | Trace 与 eval 输出 `ttfa_ms/retrieval_ms/tier_max/cache_hits`；超出 `slo.max_ttfa_ms` 记为 SLO 回归 |
+| Bench `r03_minimal_goal` | 复合需求（选项目 + 优化 + 面试题）；判卷要求只完成 G1，回答中包含 G2 的引导问题，检索轮数 ≤ 2 |
+| Bench `r04_budget_tight` | `budget.max_ms` 很小，要求走 T1 后收敛，给出带不确定性说明的回答，不超预算 |
+
+**涉及文件**（均为新增或小改；不改 Main Loop）：
+- 新增 `internal/retrieval/{types,ledger,goal,stop,tier,budget,cache,fuse,dedup,metrics}.go`；
+- 新增 `internal/retrieval/{keyword,grep}_retriever.go`；
+- 新增 `internal/tools/{search,evidence}.go`；
+- 修改 `internal/runctx`：新增 `WithRetrievalTask`、`WithBudget`；
+- 修改 `internal/engine/subagent.go`：生成 task ID、注入检索状态临时消息；
+- 修改 `internal/app/app.go`：挂载工具；
+- 修改 `internal/eval/benchmark.go`：SLO 字段与回归判定；
+- 新增 `bench/retrieval/*.json`、`deploy/skills/iterative-retrieval/SKILL.md`（写入五种追问策略、最小回答与引导追问）。
