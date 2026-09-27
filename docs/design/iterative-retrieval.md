@@ -457,3 +457,52 @@ Trace 现在只有预览，不能回放。回放用单独的 cassette 实现，�
 - 修改 `internal/app/app.go`：挂载工具；
 - 修改 `internal/eval/benchmark.go`：SLO 字段与回归判定；
 - 新增 `bench/retrieval/*.json`、`deploy/skills/iterative-retrieval/SKILL.md`（写入五种追问策略、最小回答与引导追问）。
+
+## 13. 实现前钉死的四项口径（codex 复核 e5827a9 后补充）
+
+### 13.1 预算余量：分母与统一换算
+- 每个**已配置**的预算维度单独计算余量：`r_i = max(0, (limit_i − used_i) / limit_i)`。未配置的维度不参与计算；`MaxRounds` 始终有默认值 3，所以至少有一个维度。
+
+| 维度 | used 的口径 | 分母 |
+|---|---|---|
+| 时间 | 从检索任务开始（`RunSub` 入口，或主 Agent 首次调用 search）起算的单调时钟耗时 | `budget.max_ms` |
+| 轮次 | 已完成的 Round 数（被拒绝的 search 不计） | `max_rounds` |
+| 工具调用 | 本检索任务内 search 与 evidence 的调用次数 | `max_tool_calls` |
+| Token | CostTracker 当前会话中，自任务开始以来 prompt+completion 的增量 | `max_tokens` |
+
+- **综合余量 `R = min_i r_i`**：采用短板原则，任一维度吃紧就降级。
+- **答复预留**：最后一次生成答复必须留出空间，所以时间维度的有效分母是 `max_ms × 0.85`，Token 维度预留一次答复的估算量（默认 2k tokens）。
+- 数据源剩余量**不参与 R 的计算**，只用于判定 `sources_exhausted`：没查过的数据源多，不代表预算充足。
+- 在每次 `search` **执行前**计算 R，并把结果写进 `Round.budget_left`。§10 的阈值（< 50% 禁用 T3，< 20% 进入 T4）作用在 R 上。
+
+### 13.2 Chunk 版本指纹与 T0/L1 失效
+- `contentHash = sha256(规范化文本)`，规范化只做 CRLF→LF 与去掉行尾空白。
+- `ChunkID = sha256(source | 相对路径 | contentHash)[:16]`：**不含行号**。这样文件里插入几行导致 Chunk 挪位时，ID 不变；行号单独存在 `Lines` 里，可以更新。
+- **文件快速指纹**为 `(size, mtime_ns, inode)`。缓存命中后逐个 Chunk 复核：
+  1. 快速指纹未变 → 直接复用；
+  2. 快速指纹变了 → 重读该文件，按 contentHash 查找原文本：找到则更新 `Lines` 后复用；找不到则丢弃该条，并记为 `stale`；
+  3. 文件已删除 → 丢弃。
+- **`index_version`**＝hash(切块器版本 + 分词器版本 + BM25 参数 + 数据源配置)。它一变，L1 整体失效；它不影响 L2 证据，因为证据按 contentHash 识别。
+- 账本里的 Evidence 也保存 contentHash。复用前走同一套复核流程；复核失败时标记 `Superseded="stale"`，不删除，保留可追溯性。
+
+### 13.3 p50/p95 的最小样本量
+- 分位数采用 nearest-rank 方法。**p50 需要 n ≥ 5，p95 需要 n ≥ 20**；样本不足时报告写 `n/a (n=…)`，不参与 SLO 判定。
+- 样本来源：整套用例每题取一次端到端耗时。数量不够时，用 `cmd/bench -repeat N` 重复运行积累样本，报告同时给出 n。
+- 样本不足时 SLO 退化为逐题检查 `slo.max_ttfa_ms`，不做分位数门禁。
+- **延迟回归判定**要求基线与本次的 n 都 ≥ 20，且 p95 上升超过 20% 才算回归，避免抖动造成误报。成本与覆盖率这类确定性指标不受这个限制。
+
+### 13.4 deferred Goal 的证据：可以复用，但不计入当前 Finish gate
+- `search` 仍然只能针对 active Goal 的 Gap。但召回结果如果恰好与 deferred Goal 相关，可以通过 `evidence.mark_fact(goal_id=<deferred>)` 或自动标注 `GoalIDs` 记入账本，状态为 `candidate`。
+- **candidate 证据不计入 active Goal 的 Finish gate，也不计入覆盖率指标**。
+- deferred Goal 被提为 active 时，其 candidate 证据先按 §13.2 复核版本，然后由模型用 `evidence.mark_fact` **显式确认**，确认后才转为 `accepted`、参与覆盖率计算。这样可以避免把过期或未经验证的"顺手证据"直接当成新目标的充分依据。
+- 复用范围仍受 §11 L2 的限制：同一会话、同一工作区，不同飞书群之间不共享。
+
+**补充验收用例**：
+
+| 用例 | 验证点 |
+|---|---|
+| `TestBudgetRatioMinAndReserve` | 只配时间与轮次时，R 取两者较小值；时间分母按 0.85 预留；未配置的维度被忽略；数据源剩余量不影响 R |
+| `TestChunkIDStableAcrossLineShift` | 在文件开头插入 3 行后，原 Chunk 的 ID 不变、行号更新、缓存继续复用；修改 Chunk 内容则标记 stale |
+| `TestIndexVersionInvalidatesL1Only` | 切块参数变化时 L1 全部失效，L2 证据经 contentHash 复核后仍可复用 |
+| `TestPercentileMinSamples` | n=4 时 p50 为 n/a；n=19 时 p95 为 n/a，不参与门禁；n ≥ 20 且 p95 上升超过 20% 才判定为回归 |
+| `TestDeferredEvidenceCandidateOnly` | 为 deferred Goal 记录的证据不计入 active Finish gate；Goal 被激活后，未确认的 candidate 不计入覆盖率，确认后才计入 |
