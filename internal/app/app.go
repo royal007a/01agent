@@ -72,14 +72,18 @@ func Build(o Options) (*App, error) {
 	base.Register(tools.NewBashTool(wd))
 	base.Register(tools.NewEditFileTool(wd))
 	stateRoot := os.Getenv("CLAW_HOME")
-	if stateRoot == "" {
+	if stateRoot == "" && o.StateDir == "" {
 		var e error
 		stateRoot, e = os.UserConfigDir()
 		if e != nil {
 			return nil, fmt.Errorf("resolve retrieval state directory: %w", e)
 		}
 	}
-	ledger := retrieval.NewLedgerStore(filepath.Join(stateRoot, "go-tiny-claw", "retrieval"))
+	ledgerDir := filepath.Join(stateRoot, "go-tiny-claw", "retrieval")
+	if o.StateDir != "" { // 测试/Benchmark 显式指定状态目录时，检索账本也随之隔离
+		ledgerDir = filepath.Join(o.StateDir, "retrieval")
+	}
+	ledger := retrieval.NewLedgerStore(ledgerDir)
 	base.Register(&tools.SearchTool{Store: ledger})
 	base.Register(&tools.EvidenceTool{Store: ledger})
 	// 第 16 讲：allow/ask/deny 权限中间件，工作区 .claw/permissions.json 可热加载自定义规则
