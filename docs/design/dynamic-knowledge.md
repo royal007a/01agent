@@ -26,6 +26,11 @@
 - 事后信号：跨任务出现不一致（用户说过不要用某库，换个任务又引入）。离线回归 `TestDynamicKnowledgeAcrossSessions` 与真机测试 `TestKnowledge_CrossSession` 就是按这个信号设计的。
 - 一次性跑分（Benchmark）默认关闭（`TestCase.knowledge=false`），省一轮交互。
 
+## 验证
+- 离线：`internal/knowledge`（按类型校验、暂存区失败重试、布局与越界、去重与取代、索引损坏拒写、决策高于偏好）；`engine.TestDynamicKnowledgeAcrossSessions`（会话 1 裁决 → 外层归位 → 会话 2 的 System Prompt 带上规则；清点每次唤醒恰好一次）；`go test -race ./...` 全绿。
+- 真实模型（本地 Ollama qwen3:8b，云端额度耗尽期间的替代）：`TestKnowledge_CrossSession` 通过。会话 1 中，模型在清点提醒后记录了"日志库选型"决策（source=user）和一条发现；外层归位生成 ADR-0001，并写入规则文件。会话 2 是新会话，写 server.go 时沿用了 slog，没有引入 logrus/zap。
+- 真机暴露的问题及修复：模型把同一件事同时记成了决策和偏好 → 规则改为"决策高于偏好"：同主题有生效决策时，偏好不再单独入库；新决策会取代同主题偏好。
+
 ## 代码位置
 - `internal/knowledge/{types,inbox,placer,manager}.go`
 - `internal/tools/knowledge.go`（`record_knowledge`）

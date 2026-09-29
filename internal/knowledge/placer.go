@@ -89,12 +89,20 @@ func (p *Placer) Place(workDir string, entries []Entry) (Result, error) {
 			res.Duplicates++
 			continue
 		}
+		// 同主题已有生效的决策时，偏好只是它的弱化表达，不再单独入库（实测模型常把同一件事同时记成决策和偏好）
+		if e.Kind == UserTriage && hasActive(idx, Decision, e.Subject) {
+			res.Duplicates++
+			continue
+		}
 		e.Status = Active
 		e.ID = nextID(idx, e.Kind)
 		// 同主题的旧条目被取代（决策、偏好、发现都适用：新事实覆盖旧事实）
 		for i := range idx {
 			old := &idx[i]
-			if old.Status == Active && old.Kind == e.Kind && Norm(old.Subject) == Norm(e.Subject) {
+			sameKind := old.Kind == e.Kind
+			// 决策高于偏好：新决策同时取代同主题的偏好
+			decisionOverPref := e.Kind == Decision && old.Kind == UserTriage
+			if old.Status == Active && (sameKind || decisionOverPref) && Norm(old.Subject) == Norm(e.Subject) {
 				old.Status, old.SupersededBy = Superseded, e.ID
 				res.Superseded++
 				if old.Kind == Decision && old.Location != "" {
@@ -143,6 +151,15 @@ func (p *Placer) Place(workDir string, entries []Entry) (Result, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+func hasActive(idx []Entry, k Kind, subject string) bool {
+	for _, o := range idx {
+		if o.Status == Active && o.Kind == k && Norm(o.Subject) == Norm(subject) {
+			return true
+		}
+	}
+	return false
 }
 
 func findDuplicate(idx []Entry, e Entry) *Entry {

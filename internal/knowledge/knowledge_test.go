@@ -147,3 +147,19 @@ func TestCorruptIndexRefused(t *testing.T) {
 		t.Fatal("失败时条目应保留")
 	}
 }
+
+// 实测发现：模型会把同一件事同时记成决策和偏好。决策高于偏好：同主题只保留决策。
+func TestDecisionOverridesPreference(t *testing.T) {
+	wd := t.TempDir()
+	p := &Placer{}
+	pref := Entry{Kind: UserTriage, Subject: "日志库选型", Content: "倾向用 slog", Scope: "日志", Source: "user", SessionID: "s"}
+	p.Place(wd, []Entry{pref})
+	res, _ := p.Place(wd, []Entry{dec("日志库选型", "统一用 slog，禁止 logrus", true), pref})
+	if res.Added != 1 || res.Superseded != 1 || res.Duplicates != 1 {
+		t.Fatalf("%+v", res)
+	}
+	prompt := RenderPrompt(wd)
+	if strings.Contains(prompt, "倾向用 slog") || !strings.Contains(prompt, "禁止 logrus") {
+		t.Fatalf("同主题应只保留决策:\n%s", prompt)
+	}
+}
