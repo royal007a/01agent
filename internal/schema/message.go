@@ -31,6 +31,8 @@ type Message struct {
 	IsError bool `json:"is_error,omitempty"`
 	// Usage 仅在 Assistant 消息上出现，由 Provider 填充。
 	Usage *Usage `json:"usage,omitempty"`
+	// Model 服务端在响应里回报的实际模型版本（环境锁定：检测同名模型静默滚动）。
+	Model string `json:"model,omitempty"`
 }
 
 // IsToolResult 判断该消息是否是一条工具观察结果。

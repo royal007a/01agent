@@ -131,6 +131,15 @@ Codex review（HEAD=6ec768c）共提出 5 个问题，均已修复，并补了�
 
 已知限制：`os.Root` 会拒绝使用绝对路径目标的符号链接，即使目标在工作区内；使用相对链接则正常。
 
+## 5.x 环境锁定验证（2026-09-29）
+
+- 离线：`internal/envlock`（快照往返、损坏锁拒绝、各类漂移严重级、符号链接 Skill 判错、warn/strict 处置、ModelGuard 锁定版本/首次观测/strict 拒绝）、`internal/app`（strict 下 Skill 被改拒绝启动、warn 放行、锁损坏拒绝、同名模型换代时运行中止）、`internal/eval`（与基线环境不一致/跑分途中多个模型版本时报告标注；旧报告不报）、`internal/provider`（OpenAI/Claude 响应的 `model` 透传）；`go test -race ./...` 全绿。
+- `init.sh`：首次锁定、再次比对一致；`GOTOOLCHAIN=go1.26.3` 下 go 会自动下载精确版本（toolchain 行只是下限，固定才是锁定）。
+- 本地模型：Ollama `qwen3:8b` 下 `claw env lock -probe -mode strict` 记录 observed=`qwen3:8b`，check 一致。
+- Docker：`make docker-prebuilt`（基础镜像按 digest；容器内 `GOTOOLCHAIN=go1.26.4` 下载并 `go mod verify` 通过）。容器首次启动锁定工作区卷、第二次一致、换 `CLAW_MODEL` 报错级漂移；改为 strict 后拒绝启动（exit 1）。
+- 空间漂移实测：把镜像内锁拿到宿主机 check，报 9 处漂移——OS、bash 5.2→3.2、GNU→BSD grep/sed、git 版本、rg 缺失、模型端点；而**依赖 0 处漂移**（同一 go.sum + 同一工具链）。
+- 发现并修复：launchd 服务与交互 shell 的 PATH 不一致（同机空间漂移），统一由 `scripts/runtime-env.sh` 固定；容器内编译 openai/anthropic SDK 在 colima 4G（其他项目容器占用约 3G）下 OOM，增加宿主机同工具链交叉编译的 prebuilt 模式。
+
 ## 6. 已知限制
 
 - 权限规则基于正则，不理解 shell 引号：`grep -r 'rm -rf' docs` 也会触发审批，属于误报，没有漏放。

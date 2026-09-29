@@ -2,6 +2,8 @@ module github.com/weberzhao/go-tiny-claw
 
 go 1.26
 
+toolchain go1.26.4
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.72.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.0

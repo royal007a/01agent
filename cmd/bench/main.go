@@ -75,6 +75,9 @@ func main() {
 	if baseline != nil {
 		if reg := rep.Regressions(*baseline); len(reg) > 0 {
 			log.Printf("⚠️ 相对基线出现回归: %v", reg)
+			if ds := rep.EnvDrift(baseline); len(ds) > 0 {
+				log.Printf("⚠️ 注意：环境与基线有 %d 处差异，回归可能来自环境漂移而非代码（详见报告）", len(ds))
+			}
 			os.Exit(2)
 		}
 	}

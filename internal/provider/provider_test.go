@@ -44,7 +44,7 @@ func captureServer(t *testing.T, reply string, got *map[string]any) *httptest.Se
 	}))
 }
 
-const openaiReply = `{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"c3","type":"function","function":{"name":"get_weather","arguments":""}}]}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`
+const openaiReply = `{"id":"x","object":"chat.completion","created":1,"model":"m-0801","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"c3","type":"function","function":{"name":"get_weather","arguments":""}}]}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`
 
 func TestOpenAITranslation(t *testing.T) {
 	var got map[string]any
@@ -53,6 +53,9 @@ func TestOpenAITranslation(t *testing.T) {
 	p := NewOpenAIProvider("k", srv.URL, "m")
 
 	resp, err := p.Generate(context.Background(), history, weatherTool)
+	if err == nil && resp.Model != wantServedModel(t) {
+		t.Errorf("服务端回报的模型版本未透传: %q", resp.Model)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +90,7 @@ func TestOpenAITranslation(t *testing.T) {
 	}
 }
 
-const claudeReply = `{"id":"msg","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"好"},{"type":"tool_use","id":"t9","name":"get_weather","input":{"city":"广州"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":5}}`
+const claudeReply = `{"id":"msg","type":"message","role":"assistant","model":"m-0901","content":[{"type":"text","text":"好"},{"type":"tool_use","id":"t9","name":"get_weather","input":{"city":"广州"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":5}}`
 
 func TestClaudeTranslation(t *testing.T) {
 	var got map[string]any
@@ -95,6 +98,9 @@ func TestClaudeTranslation(t *testing.T) {
 	defer srv.Close()
 	p := NewClaudeProvider("k", srv.URL, "m")
 	resp, err := p.Generate(context.Background(), history, weatherTool)
+	if err == nil && resp.Model != wantServedModel(t) {
+		t.Errorf("服务端回报的模型版本未透传: %q", resp.Model)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,4 +134,12 @@ func TestClaudeTranslation(t *testing.T) {
 	if strings.Contains(string(raw), "tool_use") || strings.Contains(string(raw), "tool_result") {
 		t.Fatalf("Claude Thinking 阶段必须降级工具块，否则 API 会拒绝: %s", raw)
 	}
+}
+
+// wantServedModel 按调用方测试名给出期望的服务端回报模型（环境锁定：检测同名模型静默滚动）。
+func wantServedModel(t *testing.T) string {
+	if strings.Contains(strings.ToLower(t.Name()), "claude") {
+		return "m-0901"
+	}
+	return "m-0801"
 }

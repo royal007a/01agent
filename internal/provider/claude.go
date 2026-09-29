@@ -149,7 +149,7 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
 		return nil, fmt.Errorf("Claude 兼容 API 请求失败: %w", err)
 	}
 
-	resultMsg := &schema.Message{Role: schema.RoleAssistant}
+	resultMsg := &schema.Message{Role: schema.RoleAssistant, Model: string(resp.Model)}
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "text":
