@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/observability"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
@@ -21,6 +22,10 @@ type Options struct {
 	Provider provider.Config
 	// LLM 非空时直接使用（测试/Benchmark 注入），否则按 Provider 配置构造
 	LLM provider.LLMProvider
+	// StateDir Harness 状态目录（为空时取 CLAW_HOME 或 ~/.go-tiny-claw）
+	StateDir string
+	// NoKnowledge 关闭动态知识更新（Benchmark 等一次性任务可关闭以减少一轮交互）
+	NoKnowledge bool
 }
 
 // App 一次组装出来的所有组件。
@@ -28,6 +33,17 @@ type App struct {
 	Engine  *engine.AgentEngine
 	WorkDir string
 	Stats   *observability.Stats
+}
+
+func stateDir(d string) string {
+	if d != "" {
+		return d
+	}
+	if v := os.Getenv("CLAW_HOME"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".go-tiny-claw")
 }
 
 // Build 像拼乐高一样组装：Provider(+CostTracker) / Registry(+权限中间件+计时) / Subagent。
@@ -60,6 +76,13 @@ func Build(o Options) (*App, error) {
 	registry := observability.NewTimedRegistry(base, tracker.Stats)
 
 	eng := engine.NewAgentEngine(tracker, registry, o.Thinking, o.PlanMode)
+
+	// 动态知识更新：内层 record_knowledge 写暂存区（Harness 状态目录），外层在 Run 结束后按工作区知识布局归位
+	if !o.NoKnowledge {
+		km := knowledge.NewManager(filepath.Join(stateDir(o.StateDir), "knowledge", "inbox"))
+		base.Register(tools.NewRecordKnowledgeTool(km.Inbox))
+		eng.Knowledge = km
+	}
 
 	// 第 17 讲：只读子智能体（read_file + 白名单 bash），挂成主 Agent 的一个普通工具
 	readOnly := tools.NewRegistry()

@@ -40,6 +40,8 @@ type TestCase struct {
 	// Approval 模拟值班人员对 ask 类高危操作的审批："approve"（默认，全部同意）/ "reject"（全部拒绝）。
 	// 没有审批通道时 ask 会 fail-closed 变成拒绝，跑分就测不到"需要审批的正常操作"了。
 	Approval string `json:"approval,omitempty"`
+	// Knowledge 为 true 时开启动态知识更新（交付前清点 + 外层归位）；一次性跑分默认关闭，省一轮交互
+	Knowledge bool `json:"knowledge,omitempty"`
 }
 
 // autoApprover 按用例策略自动审批，并记录审批次数。
@@ -244,7 +246,7 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 		}
 	}
 	// 2. 组装全新引擎（与 CLI/服务端同一套组件）
-	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Thinking: tc.Thinking, PlanMode: tc.PlanMode, Provider: r.Provider, LLM: r.LLM})
+	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Thinking: tc.Thinking, PlanMode: tc.PlanMode, Provider: r.Provider, LLM: r.LLM, NoKnowledge: !tc.Knowledge, StateDir: filepath.Join(wd, ".claw", "state")})
 	if err != nil {
 		res.Error = err.Error()
 		return

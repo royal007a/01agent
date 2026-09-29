@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 )
 
@@ -73,6 +74,8 @@ func (c *PromptComposer) Build() schema.Message {
 		b.WriteString(strings.TrimSpace(string(content)))
 		b.WriteString("\n```\n")
 	}
+	// 3.5 跨会话沉淀的知识（动态知识更新的闭环：规则、决策、偏好、发现）
+	b.WriteString(knowledge.RenderPrompt(c.workDir))
 	// 4. 技能外挂
 	b.WriteString(c.skillLoader.LoadAll())
 	return schema.Message{Role: schema.RoleSystem, Content: b.String()}

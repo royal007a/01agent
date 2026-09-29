@@ -9,8 +9,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/runctx"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
@@ -51,6 +53,9 @@ type AgentEngine struct {
 	// EarlyExitNudges 防早退（第 02 讲作者答疑提到的"完成度校验"）：模型只说了"我将…/让我…"
 	// 却没有真正调用工具就结束时，最多再推它几次（0 关闭）。弱模型（如本地 7B）常见这种"光说不练"。
 	EarlyExitNudges int
+	// Knowledge 动态知识更新（跨会话知识丢失的解法）：非空时，任务交付前注入一次"知识清点"提醒，
+	// Run 结束后由外层把暂存的知识统一归位到工作区知识载体。
+	Knowledge *knowledge.Manager
 	// OnRunFinished 每次 Run 结束时回调根 Span（Benchmark 用它统计轮数、工具失败等轨迹指标）。
 	OnRunFinished func(root *trace.Span)
 	compactor     *ctxpkg.Compactor
@@ -93,10 +98,12 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	root.Set("work_dir", session.WorkDir)
 	root.Set("thinking", e.EnableThinking)
 	root.Set("plan_mode", e.PlanMode)
+	runStart := time.Now()
 	defer func() {
 		if err != nil {
 			root.Set("error", err.Error())
 		}
+		e.settleKnowledge(root, session)
 		root.End()
 		e.exportTrace(root, session)
 		if e.OnRunFinished != nil {
@@ -113,6 +120,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	systemMsg := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode).Build()
 
 	nudges := 0
+	knowledgeChecked := false
 	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -136,6 +144,14 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 				root.Add("early_exit_nudges", 1)
 				log.Printf("[Engine] ⚠️ 模型宣布要行动却没有调用工具，注入防早退提醒 (%d/%d)", nudges, e.EarlyExitNudges)
 				session.Append(schema.Message{Role: schema.RoleUser, Content: earlyExitNudge})
+				continue
+			}
+			// 内层循环：交付前清点本轮知识（每次唤醒最多提醒一次，模型确认 none 也算清点过）
+			if e.Knowledge != nil && !knowledgeChecked && e.Knowledge.NeedsCheckpoint(session.ID, runStart) {
+				knowledgeChecked = true
+				root.Set("knowledge_checkpoint", true)
+				log.Println("[Engine] 📒 交付前知识清点：提醒模型记录本轮的用户统筹、发现与决策")
+				session.Append(schema.Message{Role: schema.RoleUser, Content: knowledgeCheckpointNudge})
 				continue
 			}
 			return nil
@@ -222,6 +238,30 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		reporter.OnMessage(ctx, "⚠️ 检测到重复失败，已注入 System Reminder 干预。")
 	}
 	return false, nil
+}
+
+const knowledgeCheckpointNudge = "[系统: 交付前知识清点] 在给出最终答复之前，请清点本轮产生的、值得在以后的会话里继续生效的知识，每条调用一次 record_knowledge：\n" +
+	"1. 用户统筹（user_triage）：用户在本轮表达的偏好或优先级，写明适用场景；\n" +
+	"2. 发现（discovery）：你在执行中核对出的新事实，写明来源（文件/命令/工具）；\n" +
+	"3. 决策（decision）：本轮做出的结论（用户裁决 source=user，或你自主决定 source=model），写明理由与适用范围；所有任务都要遵守的约束设 rule=true。\n" +
+	"如果本轮没有这类知识，调用一次 record_knowledge(kind=\"none\")。完成后再给出最终答复。"
+
+// settleKnowledge 外层循环：Run 结束后把会话暂存区的知识归位到工作区知识载体。
+func (e *AgentEngine) settleKnowledge(root *trace.Span, session *ctxpkg.Session) {
+	if e.Knowledge == nil {
+		return
+	}
+	res, err := e.Knowledge.Settle(session.ID, session.WorkDir)
+	if err != nil {
+		log.Printf("[Knowledge] 归位失败（条目已保留在暂存区，下次重试）: %v", err)
+		root.Set("knowledge_error", err.Error())
+		return
+	}
+	if res.Added+res.Superseded+res.Duplicates+res.Checkpoints > 0 {
+		log.Printf("[Knowledge] 📚 外层归位：新增 %d，取代 %d，重复 %d，清点确认 %d，更新文件 %v", res.Added, res.Superseded, res.Duplicates, res.Checkpoints, res.Files)
+		root.Set("knowledge_added", res.Added)
+		root.Set("knowledge_superseded", res.Superseded)
+	}
 }
 
 const earlyExitNudge = "[系统提醒] 你上一条回复说要去执行某个操作，但并没有真正调用任何工具，任务因此停住了。如果任务还没完成，请现在直接发起工具调用；如果已经完成，请直接给出最终结论。"

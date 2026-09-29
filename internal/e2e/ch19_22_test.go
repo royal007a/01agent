@@ -20,7 +20,7 @@ import (
 func TestL19_Tracing(t *testing.T) {
 	realProvider(t)
 	wd := workspace(t)
-	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Provider: provider.ConfigFromEnv()})
+	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Provider: provider.ConfigFromEnv(), NoKnowledge: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestL22_AgentOps(t *testing.T) {
 		t.Fatalf("%v %s", err, out)
 	}
 	t.Setenv("PATH", filepath.Join(repo, "deploy/agentops/bin")+":"+os.Getenv("PATH"))
-	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Provider: provider.ConfigFromEnv()})
+	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, Provider: provider.ConfigFromEnv(), NoKnowledge: true})
 	if err != nil {
 		t.Fatal(err)
 	}

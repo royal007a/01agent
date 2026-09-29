@@ -74,7 +74,7 @@ func TestAgentOpsScenario(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(repo, "deploy/agentops/bin")+":"+os.Getenv("PATH"))
 
 	model := &opsScript{}
-	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, LLM: model})
+	a, err := clawapp.Build(clawapp.Options{WorkDir: wd, LLM: model, StateDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
