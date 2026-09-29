@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/runctx"
@@ -55,6 +56,7 @@ func (p prefixReporter) OnMessage(context.Context, string) {} // 子智能体的
 // 与课程的差异：Reporter 从 ctx 中取（课程在构造工具时固定一个 Reporter，
 // 飞书多会话场景下子智能体的进度会发错群）；超过轮数时返回已有的部分发现而不是只丢一个错误。
 func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, registry tools.Registry) (string, error) {
+	ctx = runctx.WithRetrievalTask(ctx, fmt.Sprintf("sub-%x", time.Now().UnixNano()))
 	parent, _ := runctx.Reporter(ctx).(Reporter)
 	if parent == nil {
 		parent = NopReporter{}

@@ -10,6 +10,7 @@ import (
 	"github.com/weberzhao/go-tiny-claw/internal/observability"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
+	"github.com/weberzhao/go-tiny-claw/internal/retrieval"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
 )
 
@@ -54,6 +55,17 @@ func Build(o Options) (*App, error) {
 	base.Register(tools.NewWriteFileTool(wd))
 	base.Register(tools.NewBashTool(wd))
 	base.Register(tools.NewEditFileTool(wd))
+	stateRoot := os.Getenv("CLAW_HOME")
+	if stateRoot == "" {
+		var e error
+		stateRoot, e = os.UserConfigDir()
+		if e != nil {
+			return nil, fmt.Errorf("resolve retrieval state directory: %w", e)
+		}
+	}
+	ledger := retrieval.NewLedgerStore(filepath.Join(stateRoot, "go-tiny-claw", "retrieval"))
+	base.Register(&tools.SearchTool{Store: ledger})
+	base.Register(&tools.EvidenceTool{Store: ledger})
 	// 第 16 讲：allow/ask/deny 权限中间件，工作区 .claw/permissions.json 可热加载自定义规则
 	policy := permission.NewPolicy(filepath.Join(wd, ".claw", "permissions.json"))
 	base.Use(permission.Middleware(policy))
@@ -65,6 +77,8 @@ func Build(o Options) (*App, error) {
 	readOnly := tools.NewRegistry()
 	readOnly.Register(tools.NewReadFileTool(wd))
 	readOnly.Register(tools.NewBashTool(wd))
+	readOnly.Register(&tools.SearchTool{Store: ledger})
+	readOnly.Register(&tools.EvidenceTool{Store: ledger})
 	readOnly.Use(tools.ReadOnlyGuard())
 	readOnly.Use(permission.Middleware(policy))
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
