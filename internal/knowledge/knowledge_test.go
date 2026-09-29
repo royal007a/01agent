@@ -15,10 +15,10 @@ func dec(subject, content string, rule bool) Entry {
 func TestValidate(t *testing.T) {
 	bad := []Entry{
 		{Kind: "x", Subject: "a", Content: "b"},
-		{Kind: UserTriage, Subject: "a", Content: "b"},                         // 缺 scope
+		{Kind: UserTriage, Subject: "a", Content: "b"},                              // 缺 scope
 		{Kind: UserTriage, Subject: "a", Content: "b", Scope: "c", Source: "model"}, // 统筹只能来自用户
-		{Kind: Discovery, Subject: "a", Content: "b"},                          // 缺来源
-		{Kind: Decision, Subject: "a", Content: "b", Scope: "c", Source: "user"}, // 缺理由
+		{Kind: Discovery, Subject: "a", Content: "b"},                               // 缺来源
+		{Kind: Decision, Subject: "a", Content: "b", Scope: "c", Source: "user"},    // 缺理由
 		{Kind: Decision, Subject: "a", Content: "b", Reason: "r", Scope: "c", Source: "someone"},
 		{Kind: Decision, Content: "b", Reason: "r", Scope: "c", Source: "model"}, // 缺主题
 	}
