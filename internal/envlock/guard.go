@@ -29,7 +29,7 @@ type ModelGuard struct {
 // Generate 实现 provider.LLMProvider。
 func (g *ModelGuard) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
 	resp, err := g.Inner.Generate(ctx, msgs, tools)
-	if err != nil || resp == nil || resp.Model == "" {
+	if err != nil || resp == nil {
 		return resp, err
 	}
 	g.mu.Lock()
@@ -41,9 +41,10 @@ func (g *ModelGuard) Generate(ctx context.Context, msgs []schema.Message, tools 
 	if want == "" {
 		want = g.observed
 	}
-	if resp.Model == want {
-		return resp, nil
+	if want == "" || resp.Model == want {
+		return resp, nil // 从未拿到过版本（厂商不回报）：无从比对
 	}
+	// 已有期望版本时，响应不回报模型 = 无法核验，同样按漂移处置，否则 strict 可被空字段绕过
 	g.drifts.Add(1)
 	if g.warned == nil {
 		g.warned = map[string]bool{}
@@ -54,9 +55,16 @@ func (g *ModelGuard) Generate(ctx context.Context, msgs []schema.Message, tools 
 		if logf == nil {
 			logf = log.Printf
 		}
-		logf("⚠️ 环境漂移 [model] 服务端回报 %q，锁定/首次观测为 %q", resp.Model, want)
+		if resp.Model == "" {
+			logf("⚠️ 环境漂移 [model] 服务端响应未回报模型版本，无法核验（锁定/首次观测为 %q）", want)
+		} else {
+			logf("⚠️ 环境漂移 [model] 服务端回报 %q，锁定/首次观测为 %q", resp.Model, want)
+		}
 	}
 	if g.Strict {
+		if resp.Model == "" {
+			return nil, fmt.Errorf("envlock: 服务端未回报模型版本，无法核验是否为锁定的 %q，strict 模式拒绝继续", want)
+		}
 		return nil, fmt.Errorf("envlock: 模型已漂移（期望 %q，实际 %q），strict 模式拒绝继续", want, resp.Model)
 	}
 	return resp, nil

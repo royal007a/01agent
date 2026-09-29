@@ -202,7 +202,20 @@ func TestModelGuard(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		_, _ = gl.Generate(ctx, nil, nil)
 	}
-	if gl.Observed() != "a" || gl.Drifts() != 1 || len(logs) != 1 {
-		t.Fatalf("observed=%q drifts=%d logs=%v", gl.Observed(), gl.Drifts(), logs)
+	if gl.Observed() != "a" || gl.Drifts() != 2 || len(logs) != 2 {
+		t.Fatalf("已观测到版本后，空模型与换代都应计为漂移: observed=%q drifts=%d logs=%v", gl.Observed(), gl.Drifts(), logs)
+	}
+
+	// 有期望版本时响应不回报模型：strict 视为无法核验并拒绝（不能靠空字段绕过）
+	ge := &ModelGuard{Inner: &fakeLLM{models: []string{""}}, Expected: "v4-0801", Strict: true, Logf: logf}
+	if _, err := ge.Generate(ctx, nil, nil); err == nil || !strings.Contains(err.Error(), "无法核验") {
+		t.Fatalf("strict 下空模型必须拒绝，得到 %v", err)
+	}
+	// 厂商从不回报模型且没有锁定版本：无从比对，不误报
+	gn := &ModelGuard{Inner: &fakeLLM{models: []string{""}}, Strict: true, Logf: logf}
+	for i := 0; i < 2; i++ {
+		if _, err := gn.Generate(ctx, nil, nil); err != nil || gn.Drifts() != 0 {
+			t.Fatalf("无任何版本信息时不应报漂移: err=%v drifts=%d", err, gn.Drifts())
+		}
 	}
 }

@@ -137,8 +137,16 @@ func lockEnv(o Options, wd string, p provider.LLMProvider) (*envlock.ModelGuard,
 	if err != nil {
 		return nil, err
 	}
-	if o.LLM != nil { // 注入的 Provider 没有配置身份，不比对模型名
-		cur.Model = lk.Model
+	if o.LLM != nil { // 注入的 Provider 可能没有配置身份：只对未配置的字段豁免，配置了的照常比对
+		m := &cur.Model
+		for _, f := range []struct {
+			cur    *string
+			locked string
+		}{{&m.Provider, lk.Model.Provider}, {&m.BaseURL, lk.Model.BaseURL}, {&m.Requested, lk.Model.Requested}} {
+			if *f.cur == "" {
+				*f.cur = f.locked
+			}
+		}
 	}
 	cur.Model.Observed = "" // 实际版本要等首次响应，由哨兵在运行时核对
 	if err := envlock.Enforce(lk.Mode, envlock.Diff(lk, cur), log.Printf); err != nil {

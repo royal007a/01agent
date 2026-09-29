@@ -10,6 +10,7 @@ import (
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/envlock"
+	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 )
 
@@ -77,5 +78,36 @@ func TestStrictLockRejectsSilentModelRoll(t *testing.T) {
 	}
 	if a.Model.Observed() != "deepseek-v4.1-flash" || a.Model.Drifts() != 1 {
 		t.Fatalf("哨兵应记录实际版本: %q drifts=%d", a.Model.Observed(), a.Model.Drifts())
+	}
+}
+
+func TestInjectedLLMStillChecksConfiguredModelIdentity(t *testing.T) {
+	wd := t.TempDir()
+	l, err := envlock.Capture(envlock.CaptureOptions{WorkDir: wd, Tools: []string{"bash"},
+		Model: envlock.Model{Provider: "openai", BaseURL: "https://a/v1", Requested: "m1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Mode = envlock.ModeStrict
+	if err := envlock.Save(wd, l); err != nil {
+		t.Fatal(err)
+	}
+	opts := func(c provider.Config) Options {
+		return Options{WorkDir: wd, LLM: servedModel("m1"), Provider: c, StateDir: filepath.Join(wd, ".claw", "state"), NoKnowledge: true}
+	}
+	for name, c := range map[string]provider.Config{
+		"requested": {Kind: "openai", BaseURL: "https://a/v1", Model: "m2"},
+		"base_url":  {BaseURL: "https://b/v1"},
+		"provider":  {Kind: "claude"},
+	} {
+		if _, err := Build(opts(c)); err == nil {
+			t.Errorf("注入 LLM 但配置了 %s，strict 下配置漂移必须拒绝", name)
+		}
+	}
+	// 只对未配置的字段豁免：无身份注入、部分字段一致都放行
+	for _, c := range []provider.Config{{}, {Model: "m1"}, {Kind: "openai", BaseURL: "https://a/v1", Model: "m1"}} {
+		if _, err := Build(opts(c)); err != nil {
+			t.Errorf("配置 %+v 与锁一致，不应拒绝: %v", c, err)
+		}
 	}
 }
