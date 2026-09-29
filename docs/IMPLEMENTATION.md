@@ -59,6 +59,10 @@ Session.Append(assistant, observations, reminder?) <─────────�
 | 21 | CLI 串讲 | `internal/app.Build` 统一装配（CLI/服务端/Benchmark 共用）；CLI 支持 `-dir`、横幅、财务报表与 Trace 路径；并发竞态修复作为 Benchmark 用例 t07（Plan Mode） | `app/app.go`, `cmd/claw` |
 | 22 | AgentOps | `deploy/agentops`：运维 AGENTS.md + ops_troubleshoot Skill + 权限规则（write/edit/nginx -s/systemctl/kill 需审批，sed -i 禁止）+ 故障现场脚本 + 假 nginx；飞书群聊意图过滤（未 @ 机器人不唤醒，思考题）；离线全链路测试 `TestAgentOpsScenario` | `deploy/agentops/*`, `feishu/bot.go` |
 
+### 扩展：动态知识更新（跨会话知识丢失的解法）
+
+内层循环在交付前按"用户统筹 / 发现 / 决策"三类调用 `record_knowledge` 写入会话暂存区；外层（Harness）在 Run 结束后按工作区知识布局统一归位到 ADR、规则、偏好、发现文件，并由 PromptComposer 注入后续会话。详见 `docs/design/dynamic-knowledge.md`。
+
 ## 3. 使用
 
 ```bash
