@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,5 +224,26 @@ func TestPlacerJournalRecovery(t *testing.T) {
 	prefs, _ := os.ReadFile(blocker)
 	if len(adrs) != 1 || !strings.Contains(string(prefs), "简短") || !strings.Contains(RenderPrompt(wd), "统一用 slog") {
 		t.Fatalf("恢复后文件与索引应一致: adrs=%v prefs=%q", adrs, prefs)
+	}
+}
+
+// 回归（codex review P2）：多个段落同时超限时，总长度也不能超过 MaxPromptBytes，省略标记只出现一次。
+func TestRenderPromptStrictCap(t *testing.T) {
+	wd := t.TempDir()
+	var es []Entry
+	long := strings.Repeat("很长的内容", 30)
+	for i := 0; i < 40; i++ {
+		es = append(es,
+			Entry{Kind: Decision, Subject: fmt.Sprintf("规则%d", i), Content: long, Reason: "r", Scope: "全局", Source: "user", Rule: true, SessionID: "s"},
+			Entry{Kind: Decision, Subject: fmt.Sprintf("决策%d", i), Content: long, Reason: "r", Scope: "全局", Source: "model", SessionID: "s"},
+			Entry{Kind: UserTriage, Subject: fmt.Sprintf("偏好%d", i), Content: long, Scope: "全局", Source: "user", SessionID: "s"},
+			Entry{Kind: Discovery, Subject: fmt.Sprintf("发现%d", i), Content: long, Source: "f", SessionID: "s"})
+	}
+	if _, err := (&Placer{}).Place(wd, es); err != nil {
+		t.Fatal(err)
+	}
+	out := RenderPrompt(wd)
+	if len(out) > MaxPromptBytes || strings.Count(out, "更多条目") != 1 || !strings.Contains(out, "规则0") {
+		t.Fatalf("len=%d markers=%d", len(out), strings.Count(out, "更多条目"))
 	}
 }

@@ -67,16 +67,25 @@ func RenderPrompt(workDir string) string {
 	for _, e := range ds {
 		discs = append(discs, fmt.Sprintf("- %s：%s（来源：%s，%s）", e.Subject, e.Content, e.Source, e.RecordedAt.Format("2006-01-02")))
 	}
+	// 严格总上限：为省略标记预留空间；任一段写不下就整体停止，只追加一次省略标记。
+	const omitted = "- …（更多条目见 .claw/knowledge/ 下的文件）\n"
+	budget := MaxPromptBytes - len(omitted)
 	var b strings.Builder
 	b.WriteString("\n# 跨会话沉淀的知识（由 Harness 维护）\n")
+	truncated := false
 	section := func(title string, lines []string) {
-		if len(lines) == 0 {
+		if truncated || len(lines) == 0 {
 			return
 		}
-		b.WriteString("\n## " + title + "\n")
+		header := "\n## " + title + "\n"
+		if b.Len()+len(header)+len(lines[0])+1 > budget {
+			truncated = true
+			return
+		}
+		b.WriteString(header)
 		for _, l := range lines {
-			if b.Len()+len(l) > MaxPromptBytes {
-				b.WriteString("- …（更多条目见 .claw/knowledge/ 下的文件）\n")
+			if b.Len()+len(l)+1 > budget {
+				truncated = true
 				return
 			}
 			b.WriteString(l + "\n")
@@ -86,5 +95,8 @@ func RenderPrompt(workDir string) string {
 	section("已做出的决策", decisions)
 	section("用户偏好（倾向，不是定论；与规则冲突时以规则为准）", prefs)
 	section("近期发现（可能随代码变化过期，使用前可再核实）", discs)
+	if truncated {
+		b.WriteString(omitted)
+	}
 	return b.String()
 }
