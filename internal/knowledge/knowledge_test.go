@@ -163,3 +163,65 @@ func TestDecisionOverridesPreference(t *testing.T) {
 		t.Fatalf("同主题应只保留决策:\n%s", prompt)
 	}
 }
+
+// 回归（codex review P1）：暂存区有坏行时不能静默跳过再删除整个文件。
+func TestInboxCorruptLineNotDeleted(t *testing.T) {
+	dir := t.TempDir()
+	in := NewInbox(dir)
+	in.Record(dec("a", "b", false))
+	f, _ := os.OpenFile(in.path("s1"), os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString("{not json\n")
+	f.Close()
+	orig, _ := os.ReadFile(in.path("s1"))
+	called := false
+	err := in.Take("s1", func([]Entry) error { called = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "损坏") || called {
+		t.Fatalf("坏行应返回错误且不归位: err=%v called=%v", err, called)
+	}
+	qs, _ := filepath.Glob(filepath.Join(dir, "*.corrupt-*"))
+	if len(qs) != 1 {
+		t.Fatal("原文件应被隔离保留")
+	}
+	if q, _ := os.ReadFile(qs[0]); string(q) != string(orig) {
+		t.Fatal("隔离文件必须与原文件逐字节一致")
+	}
+	if _, err := in.Record(dec("c", "d", false)); err != nil {
+		t.Fatal("隔离后应能继续记录")
+	}
+	if es, err := in.Pending("s1"); err != nil || len(es) != 1 {
+		t.Fatalf("新文件应只含新条目: %v %d", err, len(es))
+	}
+}
+
+// 回归（codex review P1）：多文件写入中途失败不能留下与索引不一致的状态，重试也不能漂移或重复。
+func TestPlacerJournalRecovery(t *testing.T) {
+	wd := t.TempDir()
+	p := &Placer{}
+	entries := []Entry{dec("日志库选型", "统一用 slog", true), {Kind: UserTriage, Subject: "风格", Content: "简短", Scope: "所有对话", Source: "user", SessionID: "s"}}
+	// 在偏好文件的位置放一个非空目录，让中途的 rename 失败
+	blocker := filepath.Join(wd, ".claw/knowledge/preferences.md")
+	os.MkdirAll(filepath.Join(blocker, "x"), 0o755)
+	if _, err := p.Place(wd, entries); err == nil {
+		t.Fatal("中途写失败应返回错误")
+	}
+	if _, err := os.Stat(filepath.Join(wd, ".claw/knowledge/index.json")); err == nil {
+		t.Fatal("索引是提交点，失败时不应已写入")
+	}
+	if _, err := os.Stat(filepath.Join(wd, ".claw/knowledge/.journal.json")); err != nil {
+		t.Fatal("失败时应保留归位日志")
+	}
+	os.RemoveAll(blocker)
+	// Inbox 重试同一批条目：先重放日志完成上次提交，再对重试条目去重，不产生新编号
+	res, err := p.Place(wd, entries)
+	if err != nil || res.Added != 0 || res.Duplicates != 2 {
+		t.Fatalf("重试应先恢复再去重: %+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, ".claw/knowledge/.journal.json")); err == nil {
+		t.Fatal("恢复后日志应删除")
+	}
+	adrs, _ := filepath.Glob(filepath.Join(wd, ".claw/knowledge/decisions/*.md"))
+	prefs, _ := os.ReadFile(blocker)
+	if len(adrs) != 1 || !strings.Contains(string(prefs), "简短") || !strings.Contains(RenderPrompt(wd), "统一用 slog") {
+		t.Fatalf("恢复后文件与索引应一致: adrs=%v prefs=%q", adrs, prefs)
+	}
+}

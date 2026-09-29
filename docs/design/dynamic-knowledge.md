@@ -31,6 +31,10 @@
 - 真实模型（本地 Ollama qwen3:8b，云端额度耗尽期间的替代）：`TestKnowledge_CrossSession` 通过。会话 1 中，模型在清点提醒后记录了"日志库选型"决策（source=user）和一条发现；外层归位生成 ADR-0001，并写入规则文件。会话 2 是新会话，写 server.go 时沿用了 slog，没有引入 logrus/zap。
 - 真机暴露的问题及修复：模型把同一件事同时记成了决策和偏好 → 规则改为"决策高于偏好"：同主题有生效决策时，偏好不再单独入库；新决策会取代同主题偏好。
 
+## 失败语义（codex review 后补强）
+- **暂存区有坏行**：不静默跳过，也不删除文件。`Take` 返回 `ErrCorrupt`，原文件按字节原样隔离为 `*.corrupt-<ts>` 待人工检查，这次不做任何归位；后续记录写入新文件，会话不会就此卡死。
+- **多文件归位**：两阶段提交。先把"新索引 + 全部待写文件"写入 `.claw/knowledge/.journal.json`，再逐个原子写文件，**最后写索引**（索引是提交点），然后删除日志。中途失败或崩溃后，下一次 `Place` 会先重放日志完成那次提交，再处理新条目。Inbox 重试同一批条目时，按内容去重，不产生新编号，也不会让文件与索引漂移（回归测试 `TestPlacerJournalRecovery`）。
+
 ## 代码位置
 - `internal/knowledge/{types,inbox,placer,manager}.go`
 - `internal/tools/knowledge.go`（`record_knowledge`）

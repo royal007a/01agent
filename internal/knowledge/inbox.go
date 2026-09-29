@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,19 +76,30 @@ func (b *Inbox) read(sessionID string) ([]Entry, error) {
 	var out []Entry
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	bad := 0
 	for sc.Scan() {
 		var e Entry
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
-			continue // 损坏行跳过，不影响其余条目
+			bad++
+			continue
 		}
 		out = append(out, e)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	if bad > 0 {
+		return out, fmt.Errorf("%w: %d 行无法解析", ErrCorrupt, bad)
+	}
+	return out, nil
 }
+
+// ErrCorrupt 暂存区文件存在无法解析的行。
+var ErrCorrupt = errors.New("知识暂存区已损坏")
 
 // CheckedSince 本会话自 since 以来是否已经做过清点（记录了任意条目，含 none）。
 func (b *Inbox) CheckedSince(sessionID string, since time.Time) bool {
-	es, _ := b.Pending(sessionID)
+	es, _ := b.Pending(sessionID) // 即使文件有坏行，可解析的清点记录依然算数
 	for _, e := range es {
 		if !e.RecordedAt.Before(since) {
 			return true
@@ -101,6 +113,15 @@ func (b *Inbox) Take(sessionID string, commit func([]Entry) error) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	es, err := b.read(sessionID)
+	if errors.Is(err, ErrCorrupt) {
+		// 失败保留：绝不删除。把原文件整体隔离（一个字节都不丢，留待人工检查），
+		// 后续记录写入新文件，避免这个会话的知识归位从此永久卡死。
+		q := fmt.Sprintf("%s.corrupt-%d", b.path(sessionID), time.Now().UnixNano())
+		if rerr := os.Rename(b.path(sessionID), q); rerr != nil {
+			return fmt.Errorf("%v；隔离失败: %w", err, rerr)
+		}
+		return fmt.Errorf("%v；原文件已隔离为 %s，未做任何归位", err, q)
+	}
 	if err != nil || len(es) == 0 {
 		return err
 	}

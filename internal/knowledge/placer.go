@@ -74,6 +74,9 @@ func (p *Placer) Place(workDir string, entries []Entry) (Result, error) {
 	}
 	defer root.Close()
 	l := LoadLayout(workDir)
+	if err := recoverJournal(root, l); err != nil {
+		return res, err
+	}
 
 	idx, err := loadIndex(root, l.IndexFile)
 	if err != nil {
@@ -125,32 +128,71 @@ func (p *Placer) Place(workDir string, entries []Entry) (Result, error) {
 	if res.Added == 0 && res.Superseded == 0 {
 		return res, nil
 	}
-	// 写 ADR（新增的与状态变化的）
+	// 两阶段提交：先把"新索引 + 全部待写文件"写成一份日志（journal），再逐个写文件，最后写索引、删日志。
+	// 任何一步失败/进程崩溃，下次 Place 开始时都会先重放日志，保证文件与索引最终一致，不会漂移。
+	var writes []fileWrite
 	for i := range idx {
 		e := idx[i]
-		if e.Kind != Decision || !touched[e.ID] {
-			continue
+		if e.Kind == Decision && touched[e.ID] {
+			writes = append(writes, fileWrite{e.Location, renderADR(e)})
 		}
-		if err := writeFile(root, e.Location, renderADR(e)); err != nil {
-			return res, err
-		}
-		res.Files = append(res.Files, e.Location)
 	}
-	for _, f := range []struct{ file, body string }{
-		{l.RulesFile, renderRules(idx)},
-		{l.PreferencesFile, renderPreferences(idx)},
-		{l.DiscoveriesFile, renderDiscoveries(idx)},
-	} {
-		if err := writeFile(root, f.file, f.body); err != nil {
-			return res, err
-		}
-		res.Files = append(res.Files, f.file)
-	}
+	writes = append(writes,
+		fileWrite{l.RulesFile, renderRules(idx)},
+		fileWrite{l.PreferencesFile, renderPreferences(idx)},
+		fileWrite{l.DiscoveriesFile, renderDiscoveries(idx)},
+	)
 	b, _ := json.MarshalIndent(idx, "", "  ")
-	if err := writeFile(root, l.IndexFile, string(b)); err != nil {
+	writes = append(writes, fileWrite{l.IndexFile, string(b)}) // 索引最后写：它是提交点
+	if err := commitJournal(root, journalPath(l), writes); err != nil {
 		return res, err
 	}
+	for _, w := range writes {
+		res.Files = append(res.Files, w.Path)
+	}
 	return res, nil
+}
+
+type fileWrite struct {
+	Path string `json:"path"`
+	Body string `json:"body"`
+}
+
+func journalPath(l Layout) string { return path.Join(path.Dir(l.IndexFile), ".journal.json") }
+
+// commitJournal 写日志 → 应用 → 删日志。
+func commitJournal(root *os.Root, jp string, writes []fileWrite) error {
+	jb, _ := json.Marshal(writes)
+	if err := writeFile(root, jp, string(jb)); err != nil {
+		return fmt.Errorf("写知识归位日志失败: %w", err)
+	}
+	return applyJournal(root, jp, writes)
+}
+
+func applyJournal(root *os.Root, jp string, writes []fileWrite) error {
+	for _, w := range writes {
+		if err := writeFile(root, w.Path, w.Body); err != nil {
+			return fmt.Errorf("归位写入 %s 失败（日志已保留，下次自动重放）: %w", w.Path, err)
+		}
+	}
+	return root.Remove(jp)
+}
+
+// recoverJournal 若上次归位中途失败，先重放日志完成那次提交。
+func recoverJournal(root *os.Root, l Layout) error {
+	jp := journalPath(l)
+	jb, err := root.ReadFile(jp)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var writes []fileWrite
+	if err := json.Unmarshal(jb, &writes); err != nil {
+		return fmt.Errorf("知识归位日志 %s 已损坏，拒绝继续（请人工检查）: %w", jp, err)
+	}
+	return applyJournal(root, jp, writes)
 }
 
 func hasActive(idx []Entry, k Kind, subject string) bool {
