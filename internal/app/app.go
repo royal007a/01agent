@@ -2,11 +2,14 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/envlock"
 	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/observability"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
@@ -34,6 +37,8 @@ type App struct {
 	Engine  *engine.AgentEngine
 	WorkDir string
 	Stats   *observability.Stats
+	// Model 模型哨兵：记录服务端回报的实际模型版本
+	Model *envlock.ModelGuard
 }
 
 func stateDir(d string) string {
@@ -64,7 +69,12 @@ func Build(o Options) (*App, error) {
 		return nil, fmt.Errorf("创建工作区失败: %w", err)
 	}
 	// 第 18 讲：CostTracker 装饰真实 Provider，引擎毫不知情
-	tracker := observability.NewCostTracker(p, o.Provider.Model, nil)
+	// 环境锁定：工作区有 .claw/env.lock.json 时启动先比对漂移；模型哨兵总是挂上，检测运行途中的静默滚动
+	guard, err := lockEnv(o, wd, p)
+	if err != nil {
+		return nil, err
+	}
+	tracker := observability.NewCostTracker(guard, o.Provider.Model, nil)
 
 	base := tools.NewRegistry()
 	base.Register(tools.NewReadFileTool(wd))
@@ -110,5 +120,38 @@ func Build(o Options) (*App, error) {
 	readOnly.Use(permission.Middleware(policy))
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
 
-	return &App{Engine: eng, WorkDir: wd, Stats: tracker.Stats}, nil
+	return &App{Engine: eng, WorkDir: wd, Stats: tracker.Stats, Model: guard}, nil
+}
+
+// lockEnv 按工作区锁文件校验环境；无锁时只挂模型哨兵，锁文件损坏则拒绝启动。
+func lockEnv(o Options, wd string, p provider.LLMProvider) (*envlock.ModelGuard, error) {
+	g := &envlock.ModelGuard{Inner: p}
+	lk, err := envlock.Load(wd)
+	if errors.Is(err, envlock.ErrNoLock) {
+		return g, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cur, err := envlock.Capture(envlock.CaptureOptions{WorkDir: wd, Model: envlock.ModelOf(o.Provider), Tools: lk.ToolNames()})
+	if err != nil {
+		return nil, err
+	}
+	if o.LLM != nil { // 注入的 Provider 可能没有配置身份：只对未配置的字段豁免，配置了的照常比对
+		m := &cur.Model
+		for _, f := range []struct {
+			cur    *string
+			locked string
+		}{{&m.Provider, lk.Model.Provider}, {&m.BaseURL, lk.Model.BaseURL}, {&m.Requested, lk.Model.Requested}} {
+			if *f.cur == "" {
+				*f.cur = f.locked
+			}
+		}
+	}
+	cur.Model.Observed = "" // 实际版本要等首次响应，由哨兵在运行时核对
+	if err := envlock.Enforce(lk.Mode, envlock.Diff(lk, cur), log.Printf); err != nil {
+		return nil, err
+	}
+	g.Expected, g.Strict = lk.Model.Observed, lk.Mode == envlock.ModeStrict
+	return g, nil
 }

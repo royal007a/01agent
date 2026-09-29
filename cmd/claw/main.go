@@ -2,6 +2,7 @@
 //
 //	claw -prompt "任务" [-thinking] [-workdir dir]   终端单次运行
 //	claw serve [-addr 127.0.0.1:48080]              飞书机器人服务端
+//	claw env lock|check|show [-dir wd]              环境锁定（.claw/env.lock.json）
 package main
 
 import (
@@ -58,6 +59,10 @@ func printReport(sess *ctxpkg.Session, st *observability.Stats) {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		serve(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "env" {
+		envCmd(os.Args[2:])
 		return
 	}
 	prompt := flag.String("prompt", "", "交给 Agent 的任务")

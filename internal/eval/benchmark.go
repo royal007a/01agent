@@ -19,6 +19,7 @@ import (
 	clawapp "github.com/weberzhao/go-tiny-claw/internal/app"
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
+	"github.com/weberzhao/go-tiny-claw/internal/envlock"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
@@ -83,6 +84,8 @@ type Result struct {
 	Approvals        int     `json:"approvals"`
 	WorkDir          string  `json:"work_dir,omitempty"`
 	TracePath        string  `json:"trace_path,omitempty"`
+	// ObservedModel 服务端回报的实际模型版本（环境锁定：同名模型换代时基线对比才有据可查）
+	ObservedModel string `json:"observed_model,omitempty"`
 }
 
 // Report 一次跑分的完整报告。
@@ -98,6 +101,8 @@ type Report struct {
 	DurationMs int64     `json:"duration_ms"`
 	AvgTurns   float64   `json:"avg_turns"`
 	Results    []Result  `json:"results"`
+	// Env 跑分时的环境快照；与基线不一致时，回归先归因到环境而不是代码
+	Env *envlock.Lock `json:"env,omitempty"`
 }
 
 // Runner 执行评测集。
@@ -163,6 +168,12 @@ func validateCases(cases []TestCase) error {
 func (r *Runner) RunSuite(ctx context.Context, cases []TestCase) Report {
 	start := time.Now()
 	rep := Report{StartedAt: start, Model: r.Provider.Model, Protocol: r.Provider.Kind, Total: len(cases)}
+	if env, err := envlock.Capture(envlock.CaptureOptions{WorkDir: r.WorkRoot, Model: envlock.ModelOf(r.Provider)}); err == nil {
+		env.Skills = nil // 用例 Skill 属于各自工作区，不进 Suite 级指纹
+		rep.Env = env
+	} else {
+		log.Printf("⚠️ 采集环境快照失败: %v", err)
+	}
 	results := make([]Result, len(cases))
 	par := r.Parallelism
 	if par <= 0 {
@@ -188,6 +199,14 @@ func (r *Runner) RunSuite(ctx context.Context, cases []TestCase) Report {
 	}
 	wg.Wait()
 	rep.Results = results
+	if rep.Env != nil {
+		for _, res := range results {
+			if res.ObservedModel != "" {
+				rep.Env.Model.Observed = res.ObservedModel
+				break
+			}
+		}
+	}
 	var turns int
 	for _, res := range results {
 		if res.Passed {
@@ -269,6 +288,7 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	approver := &autoApprover{approve: tc.Approval != "reject"}
 	runErr := a.Engine.Chat(runCtx, sess, tc.Prompt, approver)
 	res.Approvals = approver.count
+	res.ObservedModel = a.Model.Observed()
 
 	// 3. 采集成本与轨迹指标
 	res.PromptTokens, res.CompletionTokens, res.CostCNY = sess.UsageSnapshot()
@@ -335,6 +355,15 @@ func (rep Report) Markdown(baseline *Report) string {
 		fmt.Fprintf(&b, "- 对比基线（%s）：通过率 %.0f%% → %.0f%%，成本 ¥%.4f → ¥%.4f，平均轮数 %.1f → %.1f\n",
 			baseline.StartedAt.Format("01-02 15:04"), baseline.PassRate*100, rep.PassRate*100, baseline.TotalCost, rep.TotalCost, baseline.AvgTurns, rep.AvgTurns)
 	}
+	if models := rep.observedModels(); len(models) > 1 {
+		fmt.Fprintf(&b, "- ⚠️ 本次跑分中服务端回报了多个模型版本：%s（跑分途中模型发生了滚动）\n", strings.Join(models, "、"))
+	}
+	if ds := rep.EnvDrift(baseline); len(ds) > 0 {
+		b.WriteString("\n> ⚠️ **环境与基线不一致**：以下差异下的回归/修复不能直接归因到 Harness 代码改动。\n>\n")
+		for _, d := range ds {
+			fmt.Fprintf(&b, "> - %s\n", d)
+		}
+	}
 	b.WriteString("\n| 用例 | 结果 | 轮数 | 工具调用(失败) | 自愈提示 | Reminder | 审批 | Token 入/出 | 成本 | 耗时 |")
 	if baseline != nil {
 		b.WriteString(" 基线 |")
@@ -380,6 +409,27 @@ func (rep Report) Markdown(baseline *Report) string {
 		}
 	}
 	return b.String()
+}
+
+// EnvDrift 本次与基线的环境差异；任一方缺少快照（旧报告）视为"未测"，返回空。
+func (rep Report) EnvDrift(baseline *Report) []envlock.Drift {
+	if baseline == nil || baseline.Env == nil || rep.Env == nil {
+		return nil
+	}
+	return envlock.Diff(baseline.Env, rep.Env)
+}
+
+func (rep Report) observedModels() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range rep.Results {
+		if r.ObservedModel != "" && !seen[r.ObservedModel] {
+			seen[r.ObservedModel] = true
+			out = append(out, r.ObservedModel)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Regressions 返回在基线中通过、本次失败的用例。

@@ -2,7 +2,7 @@ BIN      ?= $(HOME)/.local/bin/claw
 PLIST    ?= $(HOME)/Library/LaunchAgents/com.weberzhao.go-tiny-claw.plist
 LABEL    := com.weberzhao.go-tiny-claw
 
-.PHONY: build test live bench agentops-demo install deploy undeploy status logs
+.PHONY: build test live bench agentops-demo install deploy undeploy status logs init env-lock env-check docker docker-prebuilt
 
 build:
 	go build -o claw ./cmd/claw
@@ -22,13 +22,35 @@ bench:
 agentops-demo:
 	bash deploy/agentops/setup-demo.sh $(HOME)/.go-tiny-claw/agentops
 
+# 环境锁定：init.sh 固定工具链/校验依赖/检查工作区环境锁；env-lock 在确认有意升级后重新锁定
+WS ?= $(HOME)/.go-tiny-claw/workspace
+init:
+	./init.sh $(WS)
+
+env-check: install
+	bash -c 'source scripts/runtime-env.sh && $(BIN) env check -dir $(WS)'
+
+env-lock: install
+	bash -c 'source scripts/runtime-env.sh && $(BIN) env lock -dir $(WS) $(if $(MODE),-mode $(MODE)) $(if $(PROBE),-probe)'
+
+DOCKER_ARGS ?= $(if $(GOPROXY_BUILD),--build-arg GOPROXY=$(GOPROXY_BUILD))
+docker:
+	docker build $(DOCKER_ARGS) -t go-tiny-claw:$$(git rev-parse --short HEAD) -t go-tiny-claw:latest .
+
+# 构建机内存不足（如 colima 4G）时：宿主机用同一锁定工具链交叉编译，再打包
+docker-prebuilt:
+	mkdir -p dist
+	GOTOOLCHAIN=$$(awk '/^toolchain /{print $$2}' go.mod) CGO_ENABLED=0 GOOS=linux GOARCH=$$(docker version -f '{{.Server.Arch}}') go build -trimpath -o dist/claw-linux ./cmd/claw
+	docker build $(DOCKER_ARGS) --build-arg BIN_FROM=prebuilt -t go-tiny-claw:$$(git rev-parse --short HEAD) -t go-tiny-claw:latest .
+
 install:
-	go build -trimpath -o $(BIN) ./cmd/claw
+	GOTOOLCHAIN=$$(awk '/^toolchain /{print $$2}' go.mod) go build -trimpath -o $(BIN) ./cmd/claw
 	@echo "installed $(BIN)"
 
 # 本地部署为 launchd 常驻服务（127.0.0.1:48080）
 deploy: install
 	mkdir -p $(HOME)/.go-tiny-claw/workspace $(HOME)/.go-tiny-claw/logs
+	CLAW_BIN=$(BIN) ./init.sh $(WS)
 	sed -e "s#__BIN__#$(BIN)#g" -e "s#__REPO__#$(CURDIR)#g" -e "s#__HOME__#$(HOME)#g" deploy/launchd.plist.tmpl > $(PLIST)
 	-launchctl bootout gui/$$(id -u)/$(LABEL) 2>/dev/null
 	@for i in 1 2 3 4 5; do launchctl print gui/$$(id -u)/$(LABEL) >/dev/null 2>&1 || break; sleep 1; done

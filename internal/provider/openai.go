@@ -121,7 +121,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
 
 	// 4. 反向翻译为内部 schema.Message
 	choice := resp.Choices[0].Message
-	resultMsg := &schema.Message{Role: schema.RoleAssistant, Content: choice.Content}
+	resultMsg := &schema.Message{Role: schema.RoleAssistant, Content: choice.Content, Model: resp.Model}
 	for _, tc := range choice.ToolCalls {
 		if tc.Type == "function" {
 			resultMsg.ToolCalls = append(resultMsg.ToolCalls, schema.ToolCall{

@@ -63,6 +63,16 @@ Session.Append(assistant, observations, reminder?) <─────────�
 
 内层循环在交付前按"用户统筹 / 发现 / 决策"三类调用 `record_knowledge` 写入会话暂存区；外层（Harness）在 Run 结束后按工作区知识布局统一归位到 ADR、规则、偏好、发现文件，并由 PromptComposer 注入后续会话。详见 `docs/design/dynamic-knowledge.md`。
 
+### 扩展：环境锁定（环境漂移的解法）
+
+锁定可控项、隔离不可控项：`internal/envlock` 把运行时（OS/arch/Go、Agent 调用的 bash/git/rg/go/grep/sed 版本）、依赖（BuildInfo 的 version+sum）、Skill 内容哈希、模型（请求名 + 服务端回报名）写进 `<workdir>/.claw/env.lock.json`；`app.Build` 启动前比对（strict 拒绝启动），`ModelGuard` 在每次响应上核对实际模型版本，Benchmark 报告带环境指纹。`init.sh`（toolchain 固定 + `go mod verify` + 工作区锁门禁）接入 `make deploy`，`Dockerfile` 按 digest 锁基础镜像。详见 `docs/design/environment-lock.md`。
+
+```bash
+make env-check                 # 当前环境与部署工作区的锁比对
+make env-lock MODE=strict PROBE=1   # 有意升级后重新锁定（探测服务端实际模型版本）
+make docker-prebuilt GOPROXY_BUILD=https://goproxy.cn,direct   # 构建镜像（colima 4G 内存不足以在容器内编译 SDK）
+```
+
 ## 3. 使用
 
 ```bash
