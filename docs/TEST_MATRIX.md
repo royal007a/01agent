@@ -21,6 +21,7 @@ go test -race ./...
 | Environment lock | `internal/envlock/envlock_test.go`、`internal/app/app_test.go`、`internal/eval/envdrift_test.go` | 快照、Diff 分级、strict/warn、模型哨兵、注入 LLM 字段豁免 |
 | Trace/Evaluator | `internal/trace/*_test.go`、`internal/eval/benchmark_test.go` | Span 树、Perfetto 导出、判卷、空 validate 拒绝、环境指纹 |
 | App assembly | `internal/app/app_test.go`、`internal/httpapi/agentops_test.go` | Provider、权限、检索、知识、子 Agent 只读守卫的统一装配 |
+| Feishu ingress | `internal/feishu/bot_test.go`、`integration_test.go` | challenge、事件去重、chat Session 路由、机器人消息过滤、审批口令 |
 
 ## 接口级手工验证
 
@@ -34,6 +35,8 @@ curl -sS -X POST http://127.0.0.1:48080/v1/chat \
 ```
 
 启用 `CLAW_HTTP_TOKEN` 时，为每个请求补 `Authorization: Bearer <token>`，并验证无 Token 返回 401。审批接口应验证：缺 session 返回 400、跨 session approve 返回 409、同 session approve/reject 后工具结果分别为成功/错误。
+
+飞书入口验证需要独立应用凭据；没有凭据时以 `internal/feishu` 离线测试为证，不将 botmux/hermes 的应用凭据复用到本服务。
 
 ## 真实模型与部署边界
 

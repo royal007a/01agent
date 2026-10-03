@@ -53,6 +53,8 @@ claw env show  [-dir DIR]
 
 `env lock` 写 `.claw/env.lock.json`；`check` 发现 error 级漂移退出码为 1，warn 级漂移只报告；`-probe` 请求 Provider 获取服务端实际模型版本。环境锁包含 OS/arch/Go、工具路径与版本、BuildInfo 依赖、Skill hash、模型 requested/observed。
 
+普通运行入口为 `claw -workdir DIR -prompt TEXT [-session ID] [-thinking] [-plan] [-yes]`；常驻入口为 `claw serve -workdir DIR`。`serve` 通过 HTTP 提供上表接口，并在配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 时启用飞书长连接。飞书事件按 `chat_id` 隔离 Session，支持 `/reset`（仅会话空闲时）以及 `approve <6位task_id>` / `reject <6位task_id>` 审批口令；机器人自身消息和重复 event_id 会被过滤。
+
 ## 状态与持久化
 
 - Session：`<CLAW_HOME>/sessions/*.jsonl`，会话 ID 文件名带 hash，启动时恢复；损坏尾行隔离为 `.corrupt-<timestamp>`。
