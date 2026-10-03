@@ -114,8 +114,6 @@ func Build(o Options) (*App, error) {
 	readOnly := tools.NewRegistry()
 	readOnly.Register(tools.NewReadFileTool(wd))
 	readOnly.Register(tools.NewBashTool(wd))
-	readOnly.Register(&tools.SearchTool{Store: ledger})
-	readOnly.Register(&tools.EvidenceTool{Store: ledger})
 	readOnly.Use(tools.ReadOnlyGuard())
 	readOnly.Use(permission.Middleware(policy))
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
