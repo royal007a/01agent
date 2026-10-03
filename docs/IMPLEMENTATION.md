@@ -18,6 +18,9 @@ internal/feishu     飞书：事件分发、FeishuReporter、审批口令
 internal/httpapi    本地部署入口：/v1/chat、/v1/approvals、/v1/approve
 internal/runctx     通过 ctx 透传当前 Session / Reporter，供中间件、计费等横切组件使用
 internal/schema     统一"血液"：Message / ToolCall / ToolResult / ToolDefinition / Usage
+internal/retrieval  动态 Chunk、账本、Evidence/Gap/Goal、RRF、停止评估与检索指标
+internal/knowledge  Inbox、知识归位、ADR/rules/preferences/discoveries 与恢复 journal
+internal/envlock    运行时/依赖/Skill/模型快照、漂移分级与 ModelGuard
 ```
 
 一次 Turn 的数据流：
@@ -134,6 +137,8 @@ make undeploy
 | 18 | 只有 Reminder，没有兜底 | 真机：用户要求"重试 5 次"时模型无视提醒继续重试 | 提醒后同一动作在本次唤醒内熔断（不再真实执行），另有 MaxTurns 硬预算 |
 
 ## 6. 验证记录
+
+完整接口清单与测试矩阵见 [`docs/API.md`](API.md) 和 [`docs/TEST_MATRIX.md`](TEST_MATRIX.md)。
 
 - 离线：`make test` 覆盖 9 个包——Provider 请求体翻译（httptest 抓包）、四级模糊匹配与缩进对齐、路径边界、bash 超时/后台进程/截断、并发保序与串行退化、Session 隔离与持久化恢复、Compactor、Recovery、Reminder、权限判定与热加载、审批（跨会话越权/超时/取消）、飞书 webhook（challenge、去重、串行、审批全链路）、子智能体隔离与只读守卫、CostTracker、HTTP API 审批链路。
 - 真实模型（`internal/e2e`，`make live`）：复现各讲"奇迹时刻"，结果见 `docs/VERIFICATION.md`。
