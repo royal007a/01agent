@@ -83,6 +83,20 @@ func TestSessionIsolationAndPersistence(t *testing.T) {
 	}
 }
 
+func TestResetRemovesUnloadedPersistedSession(t *testing.T) {
+	dir := t.TempDir()
+	first := NewSessionManager(dir)
+	s := first.GetOrCreate("after-restart", t.TempDir())
+	s.Append(schema.Message{Role: schema.RoleUser, Content: "persisted"})
+	// Simulate a process restart: a fresh manager has no in-memory session.
+	second := NewSessionManager(dir)
+	second.Reset("after-restart")
+	reloaded := second.GetOrCreate("after-restart", t.TempDir())
+	if got := reloaded.Len(); got != 0 {
+		t.Fatalf("reset must remove an unloaded persisted session, got %d messages", got)
+	}
+}
+
 func TestCompactor(t *testing.T) {
 	big := strings.Repeat("这是一段极其冗长的日志\n", 800)
 	msgs := []schema.Message{

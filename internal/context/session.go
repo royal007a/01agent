@@ -171,6 +171,14 @@ func (sm *SessionManager) Reset(id string) {
 			_ = os.Remove(sess.logPath)
 		}
 		sess.mu.Unlock()
+		return
+	}
+	// A service restart may leave the session only on disk. Reset must remove
+	// that persisted history too; otherwise GetOrCreate resurrects it later.
+	if sm.persistDir != "" {
+		if err := os.Remove(filepath.Join(sm.persistDir, fileNameFor(id))); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Session] 重置持久化会话 %s 失败: %v", id, err)
+		}
 	}
 }
 
