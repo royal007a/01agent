@@ -16,6 +16,8 @@
 
 `GET /healthz` 返回 `ok`，`GET /metrics` 返回运行统计（默认不鉴权）。配置 webhook 模式时，`POST /webhook/event` 也不经过 HTTP Token，而由飞书校验参数保护。
 
+`/v1/chat` 和 `/v1/approve` 的 `session` 为空时使用 `default`；只有 `GET /v1/approvals` 缺少 session 才返回 400。`GET /v1/sessions/{id}` 使用懒加载的 GetOrCreate，不存在的 ID 不返回 404。
+
 `/v1/chat` 同一 session 串行执行；审批 scope 带 `http:` 前缀，不能被飞书或其他 session 冒充。返回事件类型包括 `thinking`、`tool_call`、`tool_result`、`message`、`approval`。
 
 ## 工具接口
@@ -28,8 +30,8 @@
 | `write_file` | `path`, `content` | 工作区内原子写入 |
 | `edit_file` | `path`, `old_text`, `new_text` | 精确、换行归一、Trim、逐行去缩进四级匹配；非唯一拒绝 |
 | `bash` | `command` | 工作区 cwd、超时、输出截断；权限规则决定 allow/ask/deny |
-| `spawn_subagent` | 子任务 prompt | 隔离 Session，最多 10 Turn，只读工具/只读 Bash 守卫 |
-| `record_knowledge` | `kind`, `subject`, `content`, `reason`, `scope`, `source`, `rule` | 写入 Harness 状态目录 Inbox；Run 结束后统一归位 |
+| `spawn_subagent` | `task_prompt` | 独立 history、继承父 Session context，最多 10 Turn；只读工具/只读 Bash 守卫；超限返回部分发现 |
+| `record_knowledge` | `kind`, `subject`, `content`, `reason`, `scope`, `source`, `rule` | 写入 Harness 状态目录 Inbox；Run 结束后统一归位。只有 `kind` 必填；按类型校验，`none` 表示本轮没有新知识 |
 
 ### 检索工具
 
