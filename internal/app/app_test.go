@@ -16,22 +16,21 @@ import (
 )
 
 type retrievalAssemblyModel struct {
-	step       int
-	toolErrors []bool
+	calls int
 }
 
 func (m *retrievalAssemblyModel) Generate(_ context.Context, _ []schema.Message, defs []schema.ToolDefinition) (*schema.Message, error) {
-	if m.step == 0 {
+	step := m.calls % 3
+	m.calls++
+	if step == 0 {
 		for _, d := range defs {
 			if d.Name == "search" || d.Name == "evidence" {
-				m.step++
 				return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "e1", Name: "evidence", Arguments: json.RawMessage(`{"action":"add_gap","id":"g1","text":"find hello"}`)}}}, nil
 			}
 		}
 		return &schema.Message{Role: schema.RoleAssistant, Content: "检索工具未装配"}, nil
 	}
-	if m.step == 1 {
-		m.step++
+	if step == 1 {
 		return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "s1", Name: "search", Arguments: json.RawMessage(`{"query":"hello","gap_id":"g1","strategy":"new_term"}`)}}}, nil
 	}
 	return &schema.Message{Role: schema.RoleAssistant, Content: "完成。"}, nil
@@ -94,7 +93,8 @@ func TestBuildMainRunCanReachRetrievalTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	model := &retrievalAssemblyModel{}
-	a, err := Build(Options{WorkDir: wd, LLM: model, StateDir: filepath.Join(wd, ".state"), NoKnowledge: true})
+	stateDir := t.TempDir()
+	a, err := Build(Options{WorkDir: wd, LLM: model, StateDir: stateDir, NoKnowledge: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,13 +102,29 @@ func TestBuildMainRunCanReachRetrievalTools(t *testing.T) {
 	if err := a.Engine.Chat(context.Background(), sess, "search", engine.NopReporter{}); err != nil {
 		t.Fatalf("main run with retrieval tools failed: %v", err)
 	}
-	if model.step != 2 {
-		t.Fatalf("expected evidence and search tool calls, got step %d", model.step)
+	if model.calls != 3 {
+		t.Fatalf("expected evidence and search tool calls in first run, got %d calls", model.calls)
 	}
+	if err := a.Engine.Chat(context.Background(), sess, "search again", engine.NopReporter{}); err != nil {
+		t.Fatalf("second main run with same query should use a fresh retrieval task: %v", err)
+	}
+	if model.calls != 6 {
+		t.Fatalf("expected two complete runs, got %d calls", model.calls)
+	}
+	searchResults := 0
 	for _, msg := range sess.History() {
 		if msg.IsToolResult() && msg.IsError {
 			t.Fatalf("assembled retrieval tool returned error: %s", msg.Content)
 		}
+		if msg.IsToolResult() && strings.Contains(msg.Content, "notes.md") {
+			searchResults++
+			if strings.Contains(msg.Content, ".state") {
+				t.Fatalf("search result leaked state directory: %s", msg.Content)
+			}
+		}
+	}
+	if searchResults != 2 {
+		t.Fatalf("expected both runs to retrieve notes.md, got %d results", searchResults)
 	}
 }
 

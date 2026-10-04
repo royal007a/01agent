@@ -35,7 +35,7 @@
 
 ### 检索工具
 
-`search`：`{"query":"...","gap_id":"g1","strategy":"new_entity|constraint|new_term|verify|counter"}`。主 Agent 每次 Run 注入一个独立 retrieval task；`spawn_subagent` 也注入新的 task 并继承父 Session，因此不同唤醒/子任务的账本互相隔离。只索引 child chunk，按父块聚合，工具输出最多 6000 字节（账本不受此上限）；最多返回 8 个候选。重复 query、未知 gap、非法 strategy、预算耗尽会拒绝。
+`search`：`{"query":"...","gap_id":"g1","strategy":"new_entity|constraint|new_term|verify|counter"}`。主 Agent 每次 Run 注入一个独立 retrieval task；子 Agent 的只读注册表不提供 `search/evidence`，因此不能直接检索。不同主 Agent 唤醒的账本互相隔离。只索引 child chunk，按父块聚合，工具输出最多 6000 字节（账本不受此上限）；最多返回 8 个候选。重复 query、未知 gap、非法 strategy、预算耗尽会拒绝。
 
 `evidence`：`{"action":"add_gap|mark_fact|mark_covered|mark_unanswerable|finish", ...}`。
 
@@ -46,6 +46,8 @@
 - `finish`：仍有 open gap 时拒绝，否则将任务标为 done。
 
 账本按 `(session_id, retrieval_task)` 隔离，不进入工作区。默认保存于 `$CLAW_HOME/go-tiny-claw/retrieval`，未设 `CLAW_HOME` 时使用 `os.UserConfigDir()/go-tiny-claw/retrieval`；显式 `Options.StateDir` 时使用 `<StateDir>/retrieval`。读改写使用单锁事务和临时文件 + rename。
+
+每个主 Agent Run 会生成一个新的 retrieval task 文件；当前实现不自动回收历史账本，长驻服务需要外部按保留策略清理。
 
 ## CLI
 
