@@ -35,7 +35,7 @@
 
 ### 检索工具
 
-`search`：`{"query":"...","gap_id":"g1","strategy":"new_entity|constraint|new_term|verify|counter"}`。实际可用入口是子智能体：每次 `spawn_subagent` 注入新的 retrieval task，并继承父 Session；主 Agent 虽挂有注册项，但没有 task 时会拒绝。只索引 child chunk，按父块聚合，工具输出最多 6000 字节（账本不受此上限）；最多返回 8 个候选。重复 query、未知 gap、非法 strategy、预算耗尽会拒绝。
+`search`：`{"query":"...","gap_id":"g1","strategy":"new_entity|constraint|new_term|verify|counter"}`。主 Agent 每次 Run 注入一个独立 retrieval task；`spawn_subagent` 也注入新的 task 并继承父 Session，因此不同唤醒/子任务的账本互相隔离。只索引 child chunk，按父块聚合，工具输出最多 6000 字节（账本不受此上限）；最多返回 8 个候选。重复 query、未知 gap、非法 strategy、预算耗尽会拒绝。
 
 `evidence`：`{"action":"add_gap|mark_fact|mark_covered|mark_unanswerable|finish", ...}`。
 
@@ -57,7 +57,7 @@ claw env show  [-dir DIR]
 
 `env lock` 写 `.claw/env.lock.json`；`check` 无锁或发现 error 级漂移退出码为 2/1，warn 级漂移只报告；损坏锁和 strict 漂移拒绝启动。`-probe` 请求 Provider 获取服务端实际模型版本；已观测版本变化或期望版本时响应缺少 model 会被视为无法核验。环境锁包含 OS/arch/Go、工具路径与版本、BuildInfo 依赖、Skill hash、模型 requested/observed。
 
-普通运行入口为 `claw -workdir DIR -dir DIR -prompt TEXT [-session ID] [-thinking] [-plan] [-yes] [-max-turns N]`；没有 `-session` 时使用内存中的 `cli` 会话。常驻入口为 `claw serve -workdir DIR [-addr ADDR] [-thinking] [-plan] [-max-turns N]`。`serve` 通过 HTTP 提供上表接口，并在配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 时启用飞书长连接。飞书支持 `FEISHU_CONNECTION_MODE=webhook`、`/webhook/event`、`VERIFY_TOKEN`/`ENCRYPT_KEY`；群聊需 @ 机器人，非文本消息拒绝，过滤所有 `sender_type != user`，重复 event_id 去重。支持 `/reset`（`/new` 别名）以及 `approve/同意/批准`、`reject/拒绝/驳回` + 6 位 task_id。
+普通运行入口为 `claw [-workdir|-dir] DIR -prompt TEXT [-session ID] [-thinking] [-plan] [-yes] [-max-turns N]`；没有 `-session` 时使用内存中的 `cli` 会话。常驻入口为 `claw serve -workdir DIR [-addr ADDR] [-thinking] [-plan] [-max-turns N]`。`serve` 通过 HTTP 提供上表接口，并在配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 时启用飞书长连接。飞书支持 `FEISHU_CONNECTION_MODE=webhook`、`/webhook/event`、`FEISHU_VERIFY_TOKEN`/`FEISHU_ENCRYPT_KEY`；群聊需 @ 机器人，非文本消息拒绝，过滤所有 `sender_type != user`，重复 event_id 去重。支持 `/reset`（`/new` 别名）以及 `approve/同意/批准`、`reject/拒绝/驳回` + 6 位 task_id；审批请求 10 分钟后自动拒绝，过期 approve 返回 409。
 
 ## 状态与持久化
 

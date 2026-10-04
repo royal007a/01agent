@@ -112,6 +112,10 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	}()
 	// 把当前会话与 Reporter 放进 ctx，供 Middleware（审批）/ Tracker（计费）等横切组件使用
 	ctx = runctx.WithReporter(runctx.WithSession(ctx, session), reporter)
+	// Retrieval tools mutate a Harness-owned ledger, so the main Agent needs an
+	// explicit task scope just like a subagent. Keep it stable for every turn of
+	// this Run while isolating separate wake-ups of the same Session.
+	ctx = runctx.WithRetrievalTask(ctx, fmt.Sprintf("main-%x", runStart.UnixNano()))
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (Thinking: %v, PlanMode: %v)", session.ID, session.WorkDir, e.EnableThinking, e.PlanMode)
 
 	e.injector.Forget(session.ID) // 新的人类指令，重置死循环监控与熔断状态

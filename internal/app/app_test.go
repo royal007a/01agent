@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,28 @@ import (
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 )
+
+type retrievalAssemblyModel struct {
+	step       int
+	toolErrors []bool
+}
+
+func (m *retrievalAssemblyModel) Generate(_ context.Context, _ []schema.Message, defs []schema.ToolDefinition) (*schema.Message, error) {
+	if m.step == 0 {
+		for _, d := range defs {
+			if d.Name == "search" || d.Name == "evidence" {
+				m.step++
+				return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "e1", Name: "evidence", Arguments: json.RawMessage(`{"action":"add_gap","id":"g1","text":"find hello"}`)}}}, nil
+			}
+		}
+		return &schema.Message{Role: schema.RoleAssistant, Content: "检索工具未装配"}, nil
+	}
+	if m.step == 1 {
+		m.step++
+		return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "s1", Name: "search", Arguments: json.RawMessage(`{"query":"hello","gap_id":"g1","strategy":"new_term"}`)}}}, nil
+	}
+	return &schema.Message{Role: schema.RoleAssistant, Content: "完成。"}, nil
+}
 
 type servedModel string
 
@@ -62,6 +85,30 @@ func TestBuildEnforcesEnvLock(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(wdWarn, envlock.LockFile), []byte("{"), 0o644)
 	if _, err := build(wdWarn, "m"); err == nil {
 		t.Fatal("锁文件损坏必须拒绝启动")
+	}
+}
+
+func TestBuildMainRunCanReachRetrievalTools(t *testing.T) {
+	wd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wd, "notes.md"), []byte("# Notes\nhello from the retrieval fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model := &retrievalAssemblyModel{}
+	a, err := Build(Options{WorkDir: wd, LLM: model, StateDir: filepath.Join(wd, ".state"), NoKnowledge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := ctxpkg.NewSession("assembly", wd)
+	if err := a.Engine.Chat(context.Background(), sess, "search", engine.NopReporter{}); err != nil {
+		t.Fatalf("main run with retrieval tools failed: %v", err)
+	}
+	if model.step != 2 {
+		t.Fatalf("expected evidence and search tool calls, got step %d", model.step)
+	}
+	for _, msg := range sess.History() {
+		if msg.IsToolResult() && msg.IsError {
+			t.Fatalf("assembled retrieval tool returned error: %s", msg.Content)
+		}
 	}
 }
 

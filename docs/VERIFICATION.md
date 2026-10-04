@@ -83,6 +83,13 @@ Codex 对第 19–22 讲的 review 结论：race、装配、意图过滤均通�
 3. `launchctl kickstart -k` 重启服务后，日志显示"从磁盘恢复会话 http_deploy-smoke：12 条消息"。同一 session 追问，模型能准确复述此前的 `go run` 输出和被拒绝的删除操作。
 4. `/healthz`、`/metrics` 均正常。
 
+### 2026-10-04 增量验证
+
+- HEAD `2a532e8` 成功构建；`go test -race ./...` 与 `go vet ./...` 全绿。
+- `TestBuildMainRunCanReachRetrievalTools` 验证主 Agent Run 注入 retrieval task 后可通过 Build 装配调用 `evidence` 和 `search`，不再出现 `retrieval requires session and task`。
+- 手工 daemon 运行于 `127.0.0.1:48080`，`/healthz`、`/metrics`、`GET /v1/sessions/{id}`、reset、缺 session 的 approvals 分别得到 200、200、200、200、400。
+- 当前 shell 属于 Background launchd session，`launchctl bootstrap gui/$UID` 返回 125、`user/$UID` 返回 I/O error；因此本次是手工 daemon，崩溃/重启不会自动拉起，待可用 GUI launchd session 后再执行 `make deploy` 完成持久化部署。
+
 ## 4. 独立 review 修复（第一轮）
 
 独立 review 共发现 7 个缺陷，均已修复，并补了回归测试：
