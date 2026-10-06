@@ -284,3 +284,48 @@ func TestReadOnlyGuardArgSideEffects(t *testing.T) {
 		}
 	}
 }
+
+type contractTool struct{}
+
+func (contractTool) Name() string { return "contract" }
+func (contractTool) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{Name: "contract", InputSchema: map[string]interface{}{
+		"type": "object", "properties": map[string]interface{}{"mode": map[string]interface{}{"type": "string"}}, "required": []string{"mode"},
+	}}
+}
+func (contractTool) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+
+func TestRegistrySchemaContractAndWriteLock(t *testing.T) {
+	r := NewRegistry()
+	r.Register(contractTool{})
+	if got := r.Execute(context.Background(), schema.ToolCall{ID: "1", Name: "contract", Arguments: []byte(`{}`)}); !got.IsError || !strings.Contains(got.Output, "mode") {
+		t.Fatalf("missing required parameter should be rejected: %#v", got)
+	}
+	if got := r.Execute(context.Background(), schema.ToolCall{ID: "2", Name: "contract", Arguments: []byte(`{"mode":"safe"}`)}); got.IsError {
+		t.Fatalf("valid schema call rejected: %#v", got)
+	}
+	configurable := r.(interface{ ConfigureWriteLock(*WriteLock) })
+	configurable.ConfigureWriteLock(&WriteLock{})
+	if got := r.Execute(context.Background(), schema.ToolCall{ID: "3", Name: "contract", Arguments: []byte(`{"mode":"safe"}`)}); got.IsError {
+		t.Fatalf("locked valid call rejected: %#v", got)
+	}
+}
+
+func TestRegistryToolDefinitionsStable(t *testing.T) {
+	r := NewRegistry()
+	r.Register(contractTool{})
+	r.Register(contractTool2{})
+	a, _ := json.Marshal(r.GetAvailableTools())
+	b, _ := json.Marshal(r.GetAvailableTools())
+	if string(a) != string(b) {
+		t.Fatalf("tool definitions must be stable: %s != %s", a, b)
+	}
+}
+
+type contractTool2 struct{}
+
+func (contractTool2) Name() string { return "contract_2" }
+func (contractTool2) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{Name: "contract_2", Description: "stable"}
+}
+func (contractTool2) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }

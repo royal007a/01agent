@@ -23,7 +23,7 @@ func (t *ReadFileTool) ReadOnly() bool { return true }
 func (t *ReadFileTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
-		Description: "读取指定路径的文件内容。请提供相对工作区的路径。",
+		Description: "只读地读取工作区内的文件；适合已知路径的小文件。不要用它浏览目录、修改文件或读取工作区外路径；目录探索请用 bash 的 ls/find。输出过长会截断。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

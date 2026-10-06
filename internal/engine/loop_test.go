@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,6 +81,27 @@ func TestTwoStageLoop(t *testing.T) {
 		if !found {
 			t.Fatalf("observation 未按 ToolCallID 回灌上下文")
 		}
+	}
+}
+
+type slowProvider struct{ delay time.Duration }
+
+func (p slowProvider) Generate(ctx context.Context, _ []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	select {
+	case <-time.After(p.delay):
+		return &schema.Message{Role: schema.RoleAssistant, Content: "done"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestRunDurationBudgetIsHardAndTyped(t *testing.T) {
+	e := NewAgentEngine(slowProvider{100 * time.Millisecond}, &fakeRegistry{}, false, false)
+	e.MaxDuration = 10 * time.Millisecond
+	err := e.Chat(context.Background(), ctxpkg.NewSession("budget", t.TempDir()), "run", nil)
+	var exceeded *BudgetExceededError
+	if !errors.As(err, &exceeded) || exceeded.Budget != "duration" {
+		t.Fatalf("want typed duration budget error, got %v", err)
 	}
 }
 

@@ -77,6 +77,11 @@ func Build(o Options) (*App, error) {
 	tracker := observability.NewCostTracker(guard, o.Provider.Model, nil)
 
 	base := tools.NewRegistry()
+	// P0 安全边界：同一工作区的多个会话不能并发写入互相覆盖；审批 middleware
+	// 先执行，Registry 仅在审批通过后才获取这把锁。
+	if configurable, ok := base.(interface{ ConfigureWriteLock(*tools.WriteLock) }); ok {
+		configurable.ConfigureWriteLock(&tools.WriteLock{})
+	}
 	base.Register(tools.NewReadFileTool(wd))
 	base.Register(tools.NewWriteFileTool(wd))
 	base.Register(tools.NewBashTool(wd))

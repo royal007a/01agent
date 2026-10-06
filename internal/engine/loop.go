@@ -3,6 +3,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -48,6 +49,10 @@ type AgentEngine struct {
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
 	MaxTurns int
+	// Run 级硬预算；0 表示该维度不启用。预算按本次唤醒相对 Session 基线计算。
+	MaxDuration time.Duration
+	MaxTokens   int
+	MaxCostCNY  float64
 	// TraceDir 链路追踪导出目录（第 19 讲）；为空时写入 <工作区>/.claw/traces，为 "-" 时不导出。
 	TraceDir string
 	// EarlyExitNudges 防早退（第 02 讲作者答疑提到的"完成度校验"）：模型只说了"我将…/让我…"
@@ -93,12 +98,20 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		reporter = NopReporter{}
 	}
 	// 第 19 讲：根 Span 覆盖整个 Run；defer 保证成功/失败都会结束并导出"数字病历"
-	ctx, root := trace.Start(ctx, "Agent.Run")
+	started := time.Now()
+	basePrompt, baseCompletion, baseCost := session.UsageSnapshot()
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if e.MaxDuration > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, e.MaxDuration)
+		defer cancel()
+	}
+	runCtx, root := trace.Start(runCtx, "Agent.Run")
 	root.Set("session_id", session.ID)
 	root.Set("work_dir", session.WorkDir)
 	root.Set("thinking", e.EnableThinking)
 	root.Set("plan_mode", e.PlanMode)
-	runStart := time.Now()
+	runStart := started
 	defer func() {
 		if err != nil {
 			root.Set("error", err.Error())
@@ -111,7 +124,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		}
 	}()
 	// 把当前会话与 Reporter 放进 ctx，供 Middleware（审批）/ Tracker（计费）等横切组件使用
-	ctx = runctx.WithReporter(runctx.WithSession(ctx, session), reporter)
+	ctx = runctx.WithReporter(runctx.WithSession(runCtx, session), reporter)
 	// Retrieval tools mutate a Harness-owned ledger, so the main Agent needs an
 	// explicit task scope just like a subagent. Keep it stable for every turn of
 	// this Run while isolating separate wake-ups of the same Session.
@@ -127,7 +140,14 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	knowledgeChecked := false
 	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && e.durationExceeded(started) {
+				return &BudgetExceededError{Budget: "duration", Limit: e.MaxDuration.String(), Used: time.Since(started).Round(time.Millisecond).String()}
+			}
 			return err
+		}
+		if budgetErr := e.checkBudget(session, basePrompt, baseCompletion, baseCost, started); budgetErr != nil {
+			root.Set("budget_exceeded", budgetErr.Budget)
+			return budgetErr
 		}
 		if e.MaxTurns > 0 && turn > e.MaxTurns {
 			msg := fmt.Sprintf("⛔ 已达到单次任务的最大轮数 (%d)，为防止失控已强制停止。请检查进度后再下达更具体的指令。", e.MaxTurns)
@@ -140,6 +160,9 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		done, err := e.runTurn(turnCtx, turnSpan, session, systemMsg, reporter)
 		turnSpan.End() // 课程在 for 循环里 defer，所有 Turn 都要等 Run 结束才关闭，耗时全错；这里逐轮结束
 		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && e.durationExceeded(started) {
+				return &BudgetExceededError{Budget: "duration", Limit: e.MaxDuration.String(), Used: time.Since(started).Round(time.Millisecond).String()}
+			}
 			return err
 		}
 		if done {
@@ -161,6 +184,32 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 			return nil
 		}
 	}
+}
+
+// BudgetExceededError 是可被 HTTP/CLI 识别的正常安全熔断，而不是普通 500。
+type BudgetExceededError struct{ Budget, Limit, Used string }
+
+func (e *BudgetExceededError) Error() string {
+	return fmt.Sprintf("run budget exceeded: %s (limit=%s, used=%s)", e.Budget, e.Limit, e.Used)
+}
+
+func (e *AgentEngine) checkBudget(s *ctxpkg.Session, basePrompt, baseCompletion int, baseCost float64, started time.Time) *BudgetExceededError {
+	if e.MaxDuration > 0 && time.Since(started) >= e.MaxDuration {
+		return &BudgetExceededError{"duration", e.MaxDuration.String(), time.Since(started).Round(time.Millisecond).String()}
+	}
+	p, c, cost := s.UsageSnapshot()
+	usedTokens := (p - basePrompt) + (c - baseCompletion)
+	if e.MaxTokens > 0 && s.UsageAvailable() && usedTokens >= e.MaxTokens {
+		return &BudgetExceededError{"tokens", fmt.Sprintf("%d", e.MaxTokens), fmt.Sprintf("%d", usedTokens)}
+	}
+	if e.MaxCostCNY > 0 && s.UsageAvailable() && cost-baseCost >= e.MaxCostCNY {
+		return &BudgetExceededError{"cost_cny", fmt.Sprintf("%.6f", e.MaxCostCNY), fmt.Sprintf("%.6f", cost-baseCost)}
+	}
+	return nil
+}
+
+func (e *AgentEngine) durationExceeded(started time.Time) bool {
+	return e.MaxDuration > 0 && time.Since(started) >= e.MaxDuration
 }
 
 // runTurn 执行一个 Turn；done=true 表示模型不再请求工具。

@@ -33,7 +33,7 @@ func (t *BashTool) Name() string { return "bash" }
 func (t *BashTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
-		Description: "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)。返回标准输出(stdout)和标准错误(stderr)。常驻服务请用 nohup cmd > log 2>&1 & 转入后台。",
+		Description: "在当前工作区执行 bash 命令，适合目录探索、测试和系统工具；它可能修改文件或启动进程，会受权限/审批/超时约束。读取文件优先用 read_file；编辑文件用 edit_file/write_file；不要把 bash 当作绕过权限的通用写入入口。常驻服务请用 nohup cmd > log 2>&1 &。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

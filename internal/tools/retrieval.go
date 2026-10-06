@@ -17,7 +17,7 @@ type SearchTool struct{ Store *retrieval.LedgerStore }
 func (t *SearchTool) Name() string   { return "search" }
 func (t *SearchTool) ReadOnly() bool { return false }
 func (t *SearchTool) Definition() schema.ToolDefinition {
-	return schema.ToolDefinition{Name: t.Name(), Description: "在工作区中检索并记录增量证据", InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"query": map[string]interface{}{"type": "string"}, "gap_id": map[string]interface{}{"type": "string"}, "strategy": map[string]interface{}{"type": "string"}}, "required": []string{"query", "gap_id", "strategy"}}}
+	return schema.ToolDefinition{Name: t.Name(), Description: "只读检索工作区并记录增量证据；适合有明确 gap 的多轮调查。不要用它替代 read_file 的已知路径读取，也不要重复同一 query；必须先有 gap_id，证据仍需 evidence.mark_covered 才能完成门禁。", InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"query": map[string]interface{}{"type": "string"}, "gap_id": map[string]interface{}{"type": "string"}, "strategy": map[string]interface{}{"type": "string"}}, "required": []string{"query", "gap_id", "strategy"}}}
 }
 func (t *SearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var in struct {

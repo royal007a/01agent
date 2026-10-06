@@ -27,6 +27,7 @@ type Session struct {
 	TotalPromptTokens     int
 	TotalCompletionTokens int
 	TotalCost             float64
+	UsageKnown            bool // provider 至少返回过一次 Usage；未知时不能把 token 当作 0
 
 	history []schema.Message
 	mu      sync.RWMutex
@@ -91,6 +92,7 @@ func (s *Session) RecordUsage(prompt, completion int, cost float64) {
 	s.TotalPromptTokens += prompt
 	s.TotalCompletionTokens += completion
 	s.TotalCost += cost
+	s.UsageKnown = true
 }
 
 // UsageSnapshot 线程安全地读取累计账单。
@@ -98,6 +100,14 @@ func (s *Session) UsageSnapshot() (prompt, completion int, cost float64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalCost
+}
+
+// UsageAvailable 表示当前会话是否拿到过模型 Usage。部分本地模型不返回 Usage，
+// 此时预算守门只能依赖轮数和墙钟时间，不能静默按零 token 计算。
+func (s *Session) UsageAvailable() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.UsageKnown
 }
 
 // ==========================================

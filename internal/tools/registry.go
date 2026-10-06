@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
+	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
 
 // BaseTool 是所有具体工具必须实现的通用接口（第 05 讲）。
@@ -51,7 +53,11 @@ type registryImpl struct {
 	// 会让每轮请求的 tools 字段抖动，破坏提示词缓存（prompt cache）。
 	order       []string
 	middlewares []MiddlewareFunc
+	writeLock   *WriteLock
 }
+
+// ConfigureWriteLock 给主 Registry 配置工作区级写锁；受限只读 Registry 不配置。
+func (r *registryImpl) ConfigureWriteLock(l *WriteLock) { r.mu.Lock(); r.writeLock = l; r.mu.Unlock() }
 
 func (r *registryImpl) Use(mw MiddlewareFunc) {
 	r.mu.Lock()
@@ -110,6 +116,9 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 			IsError:    true,
 		}
 	}
+	if err := validateArgs(parseSchema(tool.Definition().InputSchema), call.Arguments); err != nil {
+		return schema.ToolResult{ToolCallID: call.ID, Output: "参数校验失败: " + err.Error(), IsError: true}
+	}
 	// 2. 核心防御：执行前依次运行所有 Middleware，任何一个拒绝即拦截
 	for _, mw := range mws {
 		if allowed, reason := mw(ctx, call); !allowed {
@@ -121,14 +130,39 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 			}
 		}
 	}
+	meta := normalizeMeta(metaOf(tool))
+	toolCtx := ctx
+	var cancel context.CancelFunc
+	if meta.TimeoutSeconds > 0 {
+		toolCtx, cancel = context.WithTimeout(ctx, time.Duration(meta.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+	var locked bool
+	if meta.SideEffect != "none" && r.writeLock != nil {
+		if err := r.writeLock.Acquire(toolCtx); err != nil {
+			return schema.ToolResult{ToolCallID: call.ID, Output: "写锁等待被取消: " + err.Error(), IsError: true}
+		}
+		locked = true
+	}
+	if locked {
+		defer r.writeLock.Release()
+	}
 	// 3. 执行工具逻辑：将原始 JSON 字节流直接丢给具体工具
-	output, err := tool.Execute(ctx, call.Arguments)
+	output, err := tool.Execute(toolCtx, call.Arguments)
 	// 4. 封装结果
 	if err != nil {
 		return schema.ToolResult{
 			ToolCallID: call.ID,
 			Output:     fmt.Sprintf("Error executing %s: %v", call.Name, err),
 			IsError:    true,
+		}
+	}
+	if len(output) > meta.MaxOutputBytes {
+		suffix := fmt.Sprintf("\n...[工具输出超过 %d 字节，已截断]...", meta.MaxOutputBytes)
+		if len(suffix) >= meta.MaxOutputBytes {
+			output = textutil.Head(output, meta.MaxOutputBytes)
+		} else {
+			output = textutil.Head(output, meta.MaxOutputBytes-len(suffix)) + suffix
 		}
 	}
 	return schema.ToolResult{ToolCallID: call.ID, Output: output}

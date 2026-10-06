@@ -36,7 +36,7 @@ func (t *SubagentTool) ReadOnly() bool { return true }
 func (t *SubagentTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
-		Description: "派出一个专门用于深度探索（Exploration）的子智能体。当你需要阅读大量代码、跨文件查找逻辑时请调用此工具。它只有只读能力，探索完毕后会给你返回一份极度精炼的摘要报告。可以在一次回复中同时派出多个子智能体并行探索不同方向。",
+		Description: "派出一个只读子智能体探索工作区并返回发现；适合可隔离、只读、可并行的调查。不要委派写文件、审批或需要共享中间状态的任务；它只能使用受限只读工具。可以在一次回复中并行派出多个不同方向的探索。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
