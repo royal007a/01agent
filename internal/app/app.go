@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/envlock"
@@ -30,6 +32,10 @@ type Options struct {
 	StateDir string
 	// NoKnowledge 关闭动态知识更新（Benchmark 等一次性任务可关闭以减少一轮交互）
 	NoKnowledge bool
+	// Run budgets. Zero values use the conservative production defaults/env.
+	MaxDuration time.Duration
+	MaxTokens   int
+	MaxCostCNY  float64
 }
 
 // App 一次组装出来的所有组件。
@@ -107,6 +113,18 @@ func Build(o Options) (*App, error) {
 	registry := observability.NewTimedRegistry(base, tracker.Stats)
 
 	eng := engine.NewAgentEngine(tracker, registry, o.Thinking, o.PlanMode)
+	eng.MaxDuration = o.MaxDuration
+	if eng.MaxDuration == 0 {
+		eng.MaxDuration = envDuration("CLAW_MAX_RUN_SECONDS", 30*time.Minute)
+	}
+	eng.MaxTokens = o.MaxTokens
+	if eng.MaxTokens == 0 {
+		eng.MaxTokens = envInt("CLAW_MAX_RUN_TOKENS")
+	}
+	eng.MaxCostCNY = o.MaxCostCNY
+	if eng.MaxCostCNY == 0 {
+		eng.MaxCostCNY = envFloat("CLAW_MAX_RUN_COST_CNY")
+	}
 
 	// 动态知识更新：内层 record_knowledge 写暂存区（Harness 状态目录），外层在 Run 结束后按工作区知识布局归位
 	if !o.NoKnowledge {
@@ -124,6 +142,27 @@ func Build(o Options) (*App, error) {
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
 
 	return &App{Engine: eng, WorkDir: wd, Stats: tracker.Stats, Model: guard}, nil
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
+		return time.Duration(v) * time.Second
+	}
+	return fallback
+}
+func envInt(name string) int {
+	v, _ := strconv.Atoi(os.Getenv(name))
+	if v > 0 {
+		return v
+	}
+	return 0
+}
+func envFloat(name string) float64 {
+	v, _ := strconv.ParseFloat(os.Getenv(name), 64)
+	if v > 0 {
+		return v
+	}
+	return 0
 }
 
 // lockEnv 按工作区锁文件校验环境；无锁时只挂模型哨兵，锁文件损坏则拒绝启动。

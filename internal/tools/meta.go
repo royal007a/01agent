@@ -50,11 +50,12 @@ func validateArgs(def schemaLike, raw json.RawMessage) error {
 			return fmt.Errorf("缺少必填参数 %q", key)
 		}
 	}
-	for name, typ := range def.Properties() {
+	for name, rule := range def.Properties() {
 		v, ok := obj[name]
 		if !ok {
 			continue
 		}
+		typ := rule.typ
 		if typ == "string" {
 			if _, ok := v.(string); !ok {
 				return fmt.Errorf("参数 %q 必须是 string", name)
@@ -66,8 +67,31 @@ func validateArgs(def schemaLike, raw json.RawMessage) error {
 			}
 		}
 		if typ == "number" || typ == "integer" {
-			if _, ok := v.(float64); !ok {
+			n, ok := v.(float64)
+			if !ok || (typ == "integer" && n != float64(int64(n))) {
 				return fmt.Errorf("参数 %q 必须是 number", name)
+			}
+		}
+		if typ == "array" {
+			if _, ok := v.([]any); !ok {
+				return fmt.Errorf("参数 %q 必须是 array", name)
+			}
+		}
+		if typ == "object" {
+			if _, ok := v.(map[string]any); !ok {
+				return fmt.Errorf("参数 %q 必须是 object", name)
+			}
+		}
+		if len(rule.enum) > 0 {
+			matched := false
+			for _, allowed := range rule.enum {
+				if fmt.Sprint(allowed) == fmt.Sprint(v) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("参数 %q 不在允许值中", name)
 			}
 		}
 	}
@@ -76,19 +100,23 @@ func validateArgs(def schemaLike, raw json.RawMessage) error {
 
 type schemaLike interface {
 	Required() []string
-	Properties() map[string]string
+	Properties() map[string]propertyRule
+}
+type propertyRule struct {
+	typ  string
+	enum []any
 }
 type inputSchema struct {
 	required   []string
-	properties map[string]string
+	properties map[string]propertyRule
 }
 
-func (s inputSchema) Required() []string            { return s.required }
-func (s inputSchema) Properties() map[string]string { return s.properties }
+func (s inputSchema) Required() []string                  { return s.required }
+func (s inputSchema) Properties() map[string]propertyRule { return s.properties }
 
 func parseSchema(v interface{}) inputSchema {
 	m, _ := v.(map[string]interface{})
-	out := inputSchema{properties: map[string]string{}}
+	out := inputSchema{properties: map[string]propertyRule{}}
 	if xs, ok := m["required"].([]string); ok {
 		out.required = xs
 	}
@@ -102,9 +130,17 @@ func parseSchema(v interface{}) inputSchema {
 	if ps, ok := m["properties"].(map[string]interface{}); ok {
 		for k, raw := range ps {
 			if p, ok := raw.(map[string]interface{}); ok {
-				if t, ok := p["type"].(string); ok {
-					out.properties[k] = t
+				rule := propertyRule{}
+				rule.typ, _ = p["type"].(string)
+				if xs, ok := p["enum"].([]interface{}); ok {
+					rule.enum = xs
 				}
+				if xs, ok := p["enum"].([]string); ok {
+					for _, x := range xs {
+						rule.enum = append(rule.enum, x)
+					}
+				}
+				out.properties[k] = rule
 			}
 		}
 	}

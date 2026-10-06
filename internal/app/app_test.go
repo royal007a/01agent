@@ -87,6 +87,16 @@ func TestBuildEnforcesEnvLock(t *testing.T) {
 	}
 }
 
+func TestBuildInstallsProductionRunBudget(t *testing.T) {
+	a, err := Build(Options{WorkDir: t.TempDir(), LLM: servedModel("m"), StateDir: t.TempDir(), NoKnowledge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Engine.MaxDuration <= 0 {
+		t.Fatalf("assembled engine must have a production duration budget, got %v", a.Engine.MaxDuration)
+	}
+}
+
 func TestBuildMainRunCanReachRetrievalTools(t *testing.T) {
 	wd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(wd, "notes.md"), []byte("# Notes\nhello from the retrieval fixture"), 0o644); err != nil {

@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -166,6 +167,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		resp["error"] = err.Error()
 		code = http.StatusInternalServerError
+		var budget *engine.BudgetExceededError
+		if errors.As(err, &budget) {
+			resp["budget_exceeded"] = true
+			code = http.StatusTooManyRequests
+		}
 	}
 	writeJSON(w, code, resp)
 }

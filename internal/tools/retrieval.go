@@ -14,6 +14,8 @@ import (
 
 type SearchTool struct{ Store *retrieval.LedgerStore }
 
+func (t *SearchTool) Meta() ToolMeta { return ToolMeta{SideEffect: "none", MaxOutputBytes: 8000} }
+
 func (t *SearchTool) Name() string   { return "search" }
 func (t *SearchTool) ReadOnly() bool { return false }
 func (t *SearchTool) Definition() schema.ToolDefinition {
@@ -143,6 +145,8 @@ func (t *SearchTool) Execute(ctx context.Context, args json.RawMessage) (string,
 }
 
 type EvidenceTool struct{ Store *retrieval.LedgerStore }
+
+func (t *EvidenceTool) Meta() ToolMeta { return ToolMeta{SideEffect: "none", MaxOutputBytes: 8000} }
 
 func (t *EvidenceTool) Name() string   { return "evidence" }
 func (t *EvidenceTool) ReadOnly() bool { return false }

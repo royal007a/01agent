@@ -162,7 +162,9 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		if len(suffix) >= meta.MaxOutputBytes {
 			output = textutil.Head(output, meta.MaxOutputBytes)
 		} else {
-			output = textutil.Head(output, meta.MaxOutputBytes-len(suffix)) + suffix
+			budget := meta.MaxOutputBytes - len(suffix)
+			head := budget / 2
+			output = textutil.Head(output, head) + suffix + textutil.Tail(output, budget-head)
 		}
 	}
 	return schema.ToolResult{ToolCallID: call.ID, Output: output}

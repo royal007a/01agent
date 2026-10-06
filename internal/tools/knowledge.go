@@ -14,6 +14,10 @@ import (
 // RecordKnowledgeTool 内层循环的"交付前知识清点"入口：只写会话暂存区，不关心知识最终住在哪里。
 type RecordKnowledgeTool struct{ Inbox *knowledge.Inbox }
 
+func (t *RecordKnowledgeTool) Meta() ToolMeta {
+	return ToolMeta{SideEffect: "none", MaxOutputBytes: 4000}
+}
+
 func NewRecordKnowledgeTool(inbox *knowledge.Inbox) *RecordKnowledgeTool {
 	return &RecordKnowledgeTool{Inbox: inbox}
 }

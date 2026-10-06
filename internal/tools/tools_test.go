@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
+	"github.com/weberzhao/go-tiny-claw/internal/textutil"
 )
 
 func args(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
@@ -141,6 +143,20 @@ func TestRegistry(t *testing.T) {
 	}
 	if !r.IsReadOnly("read_file") || r.IsReadOnly("bash") || r.IsReadOnly("nope") {
 		t.Fatal("只读判定错误")
+	}
+}
+
+func TestRegistryPreservesBashTailAfterToolTruncation(t *testing.T) {
+	r := NewRegistry()
+	r.Register(NewBashTool(t.TempDir()))
+	res := r.Execute(context.Background(), schema.ToolCall{Name: "bash", Arguments: args(map[string]string{
+		"command": "head -c 20000 /dev/zero | tr '\\0' a; echo; echo FINAL_SUMMARY_LINE",
+	})})
+	if res.IsError || !strings.Contains(res.Output, "FINAL_SUMMARY_LINE") {
+		t.Fatalf("registry must preserve command tail: error=%v output tail=%q", res.IsError, textutil.Tail(res.Output, 100))
+	}
+	if len(res.Output) > 8000 {
+		t.Fatalf("registry output exceeds cap: %d", len(res.Output))
 	}
 }
 
@@ -329,3 +345,97 @@ func (contractTool2) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{Name: "contract_2", Description: "stable"}
 }
 func (contractTool2) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+
+type serializedTool struct {
+	mu                sync.Mutex
+	active, maxActive int
+	started           chan struct{}
+	block             chan struct{}
+}
+
+func (t *serializedTool) Name() string { return "serialized" }
+func (t *serializedTool) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{Name: "serialized", InputSchema: map[string]interface{}{"type": "object"}}
+}
+func (t *serializedTool) Execute(context.Context, json.RawMessage) (string, error) {
+	t.mu.Lock()
+	t.active++
+	if t.active > t.maxActive {
+		t.maxActive = t.active
+	}
+	t.mu.Unlock()
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+	<-t.block
+	t.mu.Lock()
+	t.active--
+	t.mu.Unlock()
+	return "ok", nil
+}
+
+func TestWriteLockSerializesConcurrentCallsAndCancellation(t *testing.T) {
+	block := make(chan struct{})
+	tool := &serializedTool{started: make(chan struct{}, 2), block: block}
+	r := NewRegistry()
+	r.Register(tool)
+	r.(interface{ ConfigureWriteLock(*WriteLock) }).ConfigureWriteLock(&WriteLock{})
+	first := make(chan schema.ToolResult, 1)
+	go func() {
+		first <- r.Execute(context.Background(), schema.ToolCall{Name: "serialized", Arguments: []byte(`{}`)})
+	}()
+	<-tool.started
+	second := make(chan schema.ToolResult, 1)
+	go func() {
+		second <- r.Execute(context.Background(), schema.ToolCall{Name: "serialized", Arguments: []byte(`{}`)})
+	}()
+	select {
+	case <-tool.started:
+		t.Fatal("second writer entered before first released")
+	case <-time.After(30 * time.Millisecond):
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	third := r.Execute(ctx, schema.ToolCall{Name: "serialized", Arguments: []byte(`{}`)})
+	if !third.IsError {
+		t.Fatal("cancelled lock waiter should fail")
+	}
+	close(block)
+	<-first
+	if secondRes := <-second; secondRes.IsError {
+		t.Fatalf("second writer should eventually run: %#v", secondRes)
+	}
+	tool.mu.Lock()
+	max := tool.maxActive
+	tool.mu.Unlock()
+	if max != 1 {
+		t.Fatalf("writes overlapped, max active=%d", max)
+	}
+}
+
+func TestWriteLockIsAcquiredAfterMiddleware(t *testing.T) {
+	blockApproval := make(chan struct{})
+	approved := make(chan struct{})
+	tool := &serializedTool{started: make(chan struct{}, 2), block: make(chan struct{})}
+	close(tool.block)
+	r := NewRegistry()
+	r.Register(tool)
+	r.(interface{ ConfigureWriteLock(*WriteLock) }).ConfigureWriteLock(&WriteLock{})
+	r.Use(func(_ context.Context, call schema.ToolCall) (bool, string) {
+		if call.ID == "approval" {
+			close(approved)
+			<-blockApproval
+		}
+		return true, ""
+	})
+	go func() {
+		_ = r.Execute(context.Background(), schema.ToolCall{ID: "approval", Name: "serialized", Arguments: []byte(`{}`)})
+	}()
+	<-approved
+	res := r.Execute(context.Background(), schema.ToolCall{ID: "other", Name: "serialized", Arguments: []byte(`{}`)})
+	if res.IsError {
+		t.Fatalf("second call blocked by pending approval: %#v", res)
+	}
+	close(blockApproval)
+}
