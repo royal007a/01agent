@@ -85,6 +85,33 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 	return res
 }
 
+// GetWorkingMemoryBudget 在条数上限之外再加字符上限（第 11 讲思考题）：从最新消息往前累加，
+// 超出 maxChars 的更早消息被丢弃；最新一条无论多长都保留（超长内容交给 Compactor 掐头去尾）。
+// maxChars<=0 时等同 GetWorkingMemory。
+func (s *Session) GetWorkingMemoryBudget(limit, maxChars int) []schema.Message {
+	res := s.GetWorkingMemory(limit)
+	if maxChars <= 0 || len(res) == 0 {
+		return res
+	}
+	used, start := 0, len(res)
+	for i := len(res) - 1; i >= 0; i-- {
+		n := len(res[i].Content)
+		for _, tc := range res[i].ToolCalls {
+			n += len(tc.Arguments)
+		}
+		if used+n > maxChars && i < len(res)-1 {
+			break
+		}
+		used += n
+		start = i
+	}
+	res = res[start:]
+	for len(res) > 1 && res[0].IsToolResult() { // 同样不能以孤儿工具结果开头
+		res = res[1:]
+	}
+	return res
+}
+
 // RecordUsage 累加账单（由 CostTracker 调用）。
 func (s *Session) RecordUsage(prompt, completion int, cost float64) {
 	s.mu.Lock()

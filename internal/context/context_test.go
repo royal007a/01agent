@@ -273,3 +273,20 @@ func TestSkillsLazyLoadWhenLarge(t *testing.T) {
 		t.Fatal("未知技能名不应返回内容")
 	}
 }
+
+// 第 11 讲思考题：Working Memory 除了条数上限，还要有字符上限（超长单条消息不能撑爆请求）。
+func TestWorkingMemoryCharBudget(t *testing.T) {
+	s := NewSession("wm", t.TempDir())
+	s.Append(schema.Message{Role: schema.RoleUser, Content: strings.Repeat("旧", 5000)})
+	s.Append(schema.Message{Role: schema.RoleAssistant, Content: "好的"})
+	s.Append(schema.Message{Role: schema.RoleUser, Content: "最新问题"})
+	got := s.GetWorkingMemoryBudget(50, 1000)
+	if len(got) != 2 || got[len(got)-1].Content != "最新问题" {
+		t.Fatalf("超出字符预算的旧消息应被丢弃、最新消息保留: %d 条", len(got))
+	}
+	// 即使最新一条本身超长，也至少保留它（交给 Compactor 掐头去尾）
+	s.Append(schema.Message{Role: schema.RoleUser, Content: strings.Repeat("新", 5000)})
+	if got := s.GetWorkingMemoryBudget(50, 1000); len(got) != 1 {
+		t.Fatalf("最新消息必须保留: %d 条", len(got))
+	}
+}

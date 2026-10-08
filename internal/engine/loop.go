@@ -48,6 +48,8 @@ type AgentEngine struct {
 	PlanMode bool
 	// WorkingMemoryLimit 每轮从 Session 截取的最近消息条数（第 11 讲）
 	WorkingMemoryLimit int
+	// WorkingMemoryMaxChars 工作记忆的字符硬上限（第 11 讲思考题）；最新一条消息总会保留
+	WorkingMemoryMaxChars int
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
 	MaxTurns  int
@@ -76,16 +78,17 @@ type AgentEngine struct {
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
-		provider:           p,
-		registry:           r,
-		EnableThinking:     enableThinking,
-		PlanMode:           planMode,
-		WorkingMemoryLimit: 20,
-		MaxTurns:           60,
-		EarlyExitNudges:    2,
-		compactor:          ctxpkg.NewCompactor(20000, 6),
-		recovery:           ctxpkg.NewRecoveryManager(),
-		injector:           NewReminderInjector(),
+		provider:              p,
+		registry:              r,
+		EnableThinking:        enableThinking,
+		PlanMode:              planMode,
+		WorkingMemoryLimit:    20,
+		WorkingMemoryMaxChars: 120000,
+		MaxTurns:              60,
+		EarlyExitNudges:       2,
+		compactor:             ctxpkg.NewCompactor(20000, 6),
+		recovery:              ctxpkg.NewRecoveryManager(),
+		injector:              NewReminderInjector(),
 	}
 }
 
@@ -249,7 +252,7 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 
 	// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
 	// RepairToolPairs：会话若在工具执行中途被重启，历史里会残留"有调用没结果"，补齐后才能合法发送
-	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemory(e.WorkingMemoryLimit))...)
+	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemoryBudget(e.WorkingMemoryLimit, e.WorkingMemoryMaxChars))...)
 	compacted := e.compactor.Compact(contextHistory)
 	turnSpan.Set("context_message_count", len(compacted))
 	turnSpan.Set("context_chars", ctxpkg.EstimateLength(compacted))
