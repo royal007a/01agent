@@ -165,3 +165,46 @@ func TestApprovalCommandOnlyForTaskIDs(t *testing.T) {
 		t.Fatal("合法口令应被拦截")
 	}
 }
+
+// 第 16/22 讲：群聊里运维直接回复 "approve <id>"（不 @ 机器人）也必须生效，
+// 审批口令要在"群聊需 @"的意图过滤之前处理，否则任务只能等 10 分钟超时自动拒绝。
+// 普通闲聊仍然不唤醒 Agent，也不触发其他命令。
+func TestGroupApprovalWithoutMentionReachesCommands(t *testing.T) {
+	var mu sync.Mutex
+	var commands, runs []string
+	bot := NewFeishuBot(&fakeSender{}, func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
+		mu.Lock()
+		runs = append(runs, prompt)
+		mu.Unlock()
+		return nil
+	})
+	bot.UseCommand(func(_ context.Context, chatID, text string) bool {
+		if strings.HasPrefix(text, "approve ") || text == "/reset" {
+			mu.Lock()
+			commands = append(commands, chatID+":"+text)
+			mu.Unlock()
+			return true
+		}
+		return false
+	})
+	srv := httptest.NewServer(http.HandlerFunc(httpserverext.NewEventHandlerFunc(bot.EventDispatcher("vt", ""))))
+	defer srv.Close()
+	for _, body := range []string{
+		eventBodyIn("om_a", "oc_G", "approve abc123", "group", false),
+		eventBodyIn("om_a", "oc_G", "approve abc123", "group", false), // 飞书重推：不能执行两次
+		eventBodyIn("om_b", "oc_G", "今天中午吃什么", "group", false),
+	} {
+		if resp, err := http.Post(srv.URL, "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("event post: %v", err)
+		}
+	}
+	bot.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(commands) != 1 || commands[0] != "oc_G:approve abc123" {
+		t.Fatalf("群聊未 @ 的审批口令应恰好处理一次: %v", commands)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("群聊未 @ 的消息不应唤醒 Agent: %v", runs)
+	}
+}

@@ -146,6 +146,21 @@ func (b *FeishuBot) HandleMessage(ctx context.Context, messageID, chatID, text s
 	}()
 }
 
+// HandleCommandOnly 只尝试命令（审批、/reset 等），不唤醒 Agent；用于群聊里未 @ 机器人的消息。
+// 返回是否有命令处理了它。重复推送的事件同样去重，命令不会执行两次。
+func (b *FeishuBot) HandleCommandOnly(ctx context.Context, messageID, chatID, text string) bool {
+	if b.markSeen(messageID) {
+		return true
+	}
+	for _, c := range b.commands {
+		if c(ctx, chatID, text) {
+			log.Printf("[Feishu] 群聊 %s 未 @ 的命令已处理: %s", chatID, textutil.Truncate(text, 80, "..."))
+			return true
+		}
+	}
+	return false
+}
+
 // TryWithChatLock 在会话空闲时执行 fn（如 /reset），会话有任务在跑时返回 false。
 func (b *FeishuBot) TryWithChatLock(chatID string, fn func()) bool {
 	unlock, ok := b.chatLocks.TryLock(chatID)
@@ -184,7 +199,14 @@ func (b *FeishuBot) EventDispatcher(verifyToken, encryptKey string) *dispatcher.
 				return nil // 忽略机器人自己/其他机器人的消息，防止回环
 			}
 			if !b.AllowUnmentionedGroup && strOr(msg.ChatType) == "group" && !b.mentioned(msg.Mentions) {
-				return nil // 群聊闲聊，未 @ 机器人：不唤醒 Agent
+				// 群聊闲聊，未 @ 机器人：不唤醒 Agent。但审批 / reset 口令要先于意图过滤处理（第 16/22 讲），
+				// 否则运维直接回复 "approve <id>" 会被吞掉，任务只能等审批超时。
+				if msg.MessageType == nil || *msg.MessageType == "text" {
+					if text, err := ParseTextContent(strOr(msg.Content)); err == nil && text != "" {
+						b.HandleCommandOnly(ctx, strOr(msg.MessageId), *msg.ChatId, text)
+					}
+				}
+				return nil
 			}
 			if msg.MessageType != nil && *msg.MessageType != "text" {
 				_ = b.sender.SendText(ctx, *msg.ChatId, "目前只支持纯文本指令。")
