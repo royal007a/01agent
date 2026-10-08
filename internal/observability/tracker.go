@@ -150,6 +150,9 @@ func (t *TimedRegistry) Execute(ctx context.Context, call schema.ToolCall) schem
 	start := time.Now()
 	res := t.Registry.Execute(ctx, call)
 	d := time.Since(start)
+	if res.Timed { // 底层 Registry 测过物理执行时间：审批/写锁等待不计入（第 18 讲思考题）
+		d = res.ExecDuration
+	}
 	t.Stats.mu.Lock()
 	t.Stats.ToolCalls++
 	t.Stats.ToolLatency += d

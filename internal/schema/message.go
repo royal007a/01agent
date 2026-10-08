@@ -2,6 +2,8 @@
 // Main Loop、Provider、Tools 之间只通过这里的类型交流，与任何厂商 SDK 解耦。
 package schema
 
+import "time"
+
 import "encoding/json"
 
 // Role 定义消息的角色。
@@ -53,6 +55,9 @@ type ToolResult struct {
 	ToolCallID string `json:"tool_call_id"`
 	Output     string `json:"output"`
 	IsError    bool   `json:"is_error"`
+	// ExecDuration 工具在本地物理执行的耗时（不含审批、写锁等待）；Timed 表示 Registry 已测量过（第 18 讲）
+	ExecDuration time.Duration `json:"-"`
+	Timed        bool          `json:"-"`
 }
 
 // ToolDefinition 描述大模型可以调用的工具元信息。
