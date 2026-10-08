@@ -542,3 +542,28 @@ func TestCompactionThresholdAdaptsToRealUsage(t *testing.T) {
 		t.Fatalf("比例按会话隔离, got %d", got)
 	}
 }
+
+// 第 13 讲作者答疑：上一个任务的 TODO.md 已全部勾选时，新任务开始前 Harness 自动归档 PLAN/TODO，
+// 否则"已有文件绝不覆盖"的规则会让 Plan Mode 无法开启新任务。
+func TestPlanModeArchivesCompletedPlan(t *testing.T) {
+	wd := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd, "PLAN.md"), []byte("旧计划"), 0o644)
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [x] a\n- [x] b\n"), 0o644)
+	if err := NewAgentEngine(&todoProvider{wd: wd}, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("ar", wd), "新任务", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, "TODO.md")); !os.IsNotExist(err) {
+		t.Fatal("已完成的 TODO.md 应被移出工作区根目录")
+	}
+	archived, _ := filepath.Glob(filepath.Join(wd, ".claw", "archive", "*", "PLAN.md"))
+	if len(archived) != 1 {
+		t.Fatalf("PLAN.md 应归档到 .claw/archive/<时间>_task/: %v", archived)
+	}
+	// 未完成的计划不归档
+	wd2 := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd2, "TODO.md"), []byte("- [x] a\n- [ ] b\n"), 0o644)
+	_ = NewAgentEngine(&stubbornTalker{}, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("ar2", wd2), "继续", nil)
+	if _, err := os.Stat(filepath.Join(wd2, "TODO.md")); err != nil {
+		t.Fatal("未完成的 TODO.md 不能被归档")
+	}
+}

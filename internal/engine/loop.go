@@ -157,6 +157,12 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	ctx = runctx.WithRetrievalTask(ctx, fmt.Sprintf("main-%x", runStart.UnixNano()))
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (Thinking: %v, PlanMode: %v)", session.ID, session.WorkDir, e.EnableThinking, e.PlanMode)
 
+	if e.PlanMode {
+		if dir := archiveCompletedPlan(session.WorkDir, time.Now()); dir != "" {
+			log.Printf("[Engine] 🗄️ 上一个任务的 TODO 已全部完成，PLAN/TODO 已归档到 %s", dir)
+			root.Set("plan_archived", dir)
+		}
+	}
 	e.injector.Forget(session.ID) // 新的人类指令，重置死循环监控与熔断状态
 
 	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
@@ -581,4 +587,44 @@ func (e *AgentEngine) compactorFor(sessionID string, span *trace.Span) *ctxpkg.C
 		span.Set("compact_threshold_chars", threshold)
 	}
 	return &cc
+}
+
+// archiveCompletedPlan 第 13 讲作者答疑：TODO.md 全部勾选（且至少有一项）时，新任务开始前把 PLAN.md/TODO.md
+// 移到 .claw/archive/<时间>_task/，返回归档目录（相对工作区）；未完成或不存在时返回空。
+func archiveCompletedPlan(workDir string, now time.Time) string {
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	b, err := root.ReadFile("TODO.md")
+	if err != nil {
+		return ""
+	}
+	done := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "- [ ]") || strings.HasPrefix(t, "* [ ]") {
+			return "" // 仍有未完成项：这是同一个任务的延续，不归档
+		}
+		if strings.HasPrefix(strings.ToLower(t), "- [x]") || strings.HasPrefix(strings.ToLower(t), "* [x]") {
+			done++
+		}
+	}
+	if done == 0 {
+		return ""
+	}
+	dir := filepath.ToSlash(filepath.Join(".claw", "archive", now.Format("20060102-150405")+"_task"))
+	if err := root.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	for _, name := range []string{"PLAN.md", "TODO.md"} {
+		if _, err := root.Stat(name); err == nil {
+			if err := root.Rename(name, dir+"/"+name); err != nil {
+				log.Printf("[Engine] 归档 %s 失败: %v", name, err)
+				return ""
+			}
+		}
+	}
+	return dir
 }
