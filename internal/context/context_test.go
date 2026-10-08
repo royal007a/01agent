@@ -1,6 +1,7 @@
 package context
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -288,5 +289,32 @@ func TestWorkingMemoryCharBudget(t *testing.T) {
 	s.Append(schema.Message{Role: schema.RoleUser, Content: strings.Repeat("新", 5000)})
 	if got := s.GetWorkingMemoryBudget(50, 1000); len(got) != 1 {
 		t.Fatalf("最新消息必须保留: %d 条", len(got))
+	}
+}
+
+// 第 12 讲作者答疑：远期历史里超长的 ToolCall 参数（如 write_file 的 content）也要掩码，
+// 但保留 path 等短字段与合法 JSON；保护区内与原始 Session 历史都不能被改动。
+func TestCompactorMasksLongToolArgsOutsideWorkingMemory(t *testing.T) {
+	big := strings.Repeat("x", 3000)
+	args := []byte(`{"path":"main.go","content":"` + big + `"}`)
+	msgs := []schema.Message{
+		{Role: schema.RoleSystem, Content: "sys"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "1", Name: "write_file", Arguments: args}}},
+		{Role: schema.RoleUser, ToolCallID: "1", Content: "ok"},
+		{Role: schema.RoleUser, Content: strings.Repeat("填充", 6000)},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "2", Name: "write_file", Arguments: args}}},
+		{Role: schema.RoleUser, ToolCallID: "2", Content: "ok"},
+	}
+	c := NewCompactor(1000, 2)
+	out := c.Compact(msgs)
+	old := string(out[1].ToolCalls[0].Arguments)
+	if strings.Contains(old, big) || !strings.Contains(old, `"path":"main.go"`) || !json.Valid(out[1].ToolCalls[0].Arguments) {
+		t.Fatalf("远期 write_file 参数应掩码 content、保留 path 且是合法 JSON: %.200s", old)
+	}
+	if !strings.Contains(string(out[4].ToolCalls[0].Arguments), big) {
+		t.Fatal("保护区内的 ToolCall 参数不应被掩码")
+	}
+	if !strings.Contains(string(msgs[1].ToolCalls[0].Arguments), big) {
+		t.Fatal("压缩只作用于请求视图，不能改写原始历史")
 	}
 }

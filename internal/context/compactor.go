@@ -1,6 +1,7 @@
 package context
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -62,7 +63,18 @@ func (c *Compactor) Compact(msgs []schema.Message) []schema.Message {
 				newMsg.Content = "...[早期的推理思考过程已折叠]..."
 			}
 		}
-		// 绝不动 msg.ToolCalls：这是模型行动的证据，是维系逻辑链的关键
+		// ToolCalls 是模型行动的证据，ID/Name 绝不动；但远期超长参数（如 write_file 的大段 content）
+		// 掩码掉长字符串值，保留 path 等短字段（第 12 讲作者答疑）。复制切片，不改写原始历史。
+		if !inWorkingMemory && len(msg.ToolCalls) > 0 {
+			calls := make([]schema.ToolCall, len(msg.ToolCalls))
+			copy(calls, msg.ToolCalls)
+			for j := range calls {
+				if len(calls[j].Arguments) > maskArgsAbove {
+					calls[j].Arguments = maskLongArgs(calls[j].Arguments)
+				}
+			}
+			newMsg.ToolCalls = calls
+		}
 		compacted = append(compacted, newMsg)
 	}
 	log.Printf("[Compactor] ✅ 压缩完成。上下文长度从 %d 降至 %d。", current, EstimateLength(compacted))
@@ -79,4 +91,27 @@ func EstimateLength(msgs []schema.Message) int {
 		}
 	}
 	return n
+}
+
+// maskArgsAbove 远期 ToolCall 参数超过该字节数时触发掩码（第 12 讲作者答疑：500 字以上）。
+const maskArgsAbove = 500
+
+// maskLongArgs 把 JSON 参数里超过 200 字节的字符串值替换为占位说明，其余字段原样保留；
+// 解析失败时整体替换为合法 JSON 占位，保证发给模型 API 的参数始终可解析。
+func maskLongArgs(raw json.RawMessage) json.RawMessage {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		b, _ := json.Marshal(map[string]string{"_masked": fmt.Sprintf("[早期工具参数已掩码，原长 %d 字节]", len(raw))})
+		return b
+	}
+	for k, v := range obj {
+		if s, ok := v.(string); ok && len(s) > 200 {
+			obj[k] = fmt.Sprintf("...[早期参数已掩码，原长 %d 字节]...", len(s))
+		}
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return b
 }
