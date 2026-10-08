@@ -83,7 +83,7 @@ func fuzzyReplace(originalContent, oldText, newText string) (string, error) {
 // lineByLineReplace 按行去首尾空白后做滑动窗口匹配，并把 newText 重新对齐到原始缩进。
 func lineByLineReplace(content, oldText, newText string) (string, error) {
 	contentLines := strings.Split(content, "\n")
-	oldLines := strings.Split(strings.Trim(oldText, "\n"), "\n")
+	oldLines := strings.Split(strings.TrimSpace(oldText), "\n")
 	for i := range oldLines {
 		oldLines[i] = strings.TrimSpace(oldLines[i])
 	}

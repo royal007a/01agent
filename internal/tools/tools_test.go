@@ -459,3 +459,15 @@ func TestRegistryDoesNotDoubleTruncateSelfLimitedTools(t *testing.T) {
 		t.Fatalf("read_file 被二次截断（前 %d 字节应完整保留）", ReadFileMaxBytes)
 	}
 }
+
+// 第 07 讲 L4：old_text 首尾的纯空白行要像课程一样用 TrimSpace 整体剥掉，再逐行匹配。
+func TestFuzzyReplaceL4TrimsWhitespaceOnlyEdges(t *testing.T) {
+	content := "package x\n\nfunc f() {\n\tif x {\n\t\tfoo()\n\t}\n}\n"
+	got, err := fuzzyReplace(content, "  \nif x {\nfoo()\n}\n  ", "if x {\nbar()\n}")
+	if err != nil {
+		t.Fatalf("首尾为纯空白行的 old_text 应在 L4 命中: %v", err)
+	}
+	if !strings.Contains(got, "bar()") || strings.Contains(got, "foo()") {
+		t.Fatalf("替换结果不对: %q", got)
+	}
+}
