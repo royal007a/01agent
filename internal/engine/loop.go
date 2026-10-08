@@ -50,7 +50,9 @@ type AgentEngine struct {
 	WorkingMemoryLimit int
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
-	MaxTurns int
+	MaxTurns  int
+	slotsOnce sync.Once
+	slots     chan struct{}
 	// WorkspaceLocks 非空时，同一工作区的 Run 互斥（第 09 讲思考题）；app.Build 注入进程级共享表。
 	WorkspaceLocks *keylock.Table
 	// Run 级硬预算；0 表示该维度不启用。预算按本次唤醒相对 Session 基线计算。
@@ -402,7 +404,13 @@ func (e *AgentEngine) exportTrace(root *trace.Span, session *ctxpkg.Session) {
 	}
 }
 
-// MaxParallelTools 单轮最多同时运行的工具数（第 08 讲思考题：信号量限流）。
+// toolSlots 返回引擎级并发槽位（懒初始化，所有批次共享）。
+func (e *AgentEngine) toolSlots() chan struct{} {
+	e.slotsOnce.Do(func() { e.slots = make(chan struct{}, MaxParallelTools) })
+	return e.slots
+}
+
+// MaxParallelTools 引擎内同时运行的只读工具总数上限（第 08 讲思考题：全局信号量限流）。
 const MaxParallelTools = 5
 
 // executeTools 执行一批工具调用，并按模型原始顺序返回 Observation。
@@ -475,14 +483,19 @@ func (e *AgentEngine) executeToolsWith(ctx context.Context, registry tools.Regis
 	}
 
 	log.Printf("[Engine] 本批 %d 个工具均为只读，Fork 并发执行", len(calls))
-	sem := make(chan struct{}, MaxParallelTools)
+	sem := e.toolSlots() // 第 08 讲思考题：引擎级全局信号量，跨批次、跨会话、跨子 Agent 共享
 	var wg sync.WaitGroup
 	for i, c := range calls {
 		wg.Add(1)
 		go func(idx int, call schema.ToolCall) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			if call.Name != tools.SubagentToolName { // 编排型工具只等待子循环，不占槽位，避免嵌套死锁
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+				}
+			}
 			run(idx, call)
 		}(i, c)
 	}

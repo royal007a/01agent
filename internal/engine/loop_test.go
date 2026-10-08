@@ -467,3 +467,58 @@ func TestWorkspaceLockSerializesRunsAcrossSessions(t *testing.T) {
 		t.Fatalf("同一工作区的任务发生了并发, max=%d", g.max)
 	}
 }
+
+// nestRegistry：所有工具只读；spawn_subagent 在执行中再并发派发 5 个叶子工具（模拟子 Agent 的并行批次）。
+type nestRegistry struct {
+	e           *AgentEngine
+	mu          sync.Mutex
+	active, max int
+}
+
+func (n *nestRegistry) Register(tools.BaseTool)  {}
+func (n *nestRegistry) Use(tools.MiddlewareFunc) {}
+func (n *nestRegistry) IsReadOnly(string) bool   { return true }
+func (n *nestRegistry) GetAvailableTools() []schema.ToolDefinition {
+	return []schema.ToolDefinition{{Name: "leaf"}, {Name: tools.SubagentToolName}}
+}
+func (n *nestRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	if call.Name == tools.SubagentToolName {
+		leaves := make([]schema.ToolCall, 5)
+		for i := range leaves {
+			leaves[i] = schema.ToolCall{ID: fmt.Sprint(i), Name: "leaf"}
+		}
+		n.e.executeToolsWith(ctx, n, leaves, NopReporter{})
+		return schema.ToolResult{ToolCallID: call.ID, Output: "sub done"}
+	}
+	n.mu.Lock()
+	n.active++
+	if n.active > n.max {
+		n.max = n.active
+	}
+	n.mu.Unlock()
+	time.Sleep(10 * time.Millisecond)
+	n.mu.Lock()
+	n.active--
+	n.mu.Unlock()
+	return schema.ToolResult{ToolCallID: call.ID, Output: "ok"}
+}
+
+// 第 08 讲思考题：并发上限是全局的——5 个并行子 Agent 各自再并发 5 个工具，叶子工具总并发仍 ≤ MaxParallelTools，且不死锁。
+func TestGlobalToolConcurrencyCapWithNestedSubagents(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &fakeRegistry{}, false, false)
+	n := &nestRegistry{e: e}
+	calls := make([]schema.ToolCall, 5)
+	for i := range calls {
+		calls[i] = schema.ToolCall{ID: fmt.Sprint("s", i), Name: tools.SubagentToolName}
+	}
+	done := make(chan struct{})
+	go func() { e.executeToolsWith(context.Background(), n, calls, NopReporter{}); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("嵌套子 Agent 的并发执行发生死锁")
+	}
+	if n.max > MaxParallelTools {
+		t.Fatalf("叶子工具总并发 %d 超过全局上限 %d", n.max, MaxParallelTools)
+	}
+}
