@@ -73,6 +73,7 @@ func main() {
 	sessionID := flag.String("session", "", "会话 ID；设置后历史以 JSONL 持久化，可跨进程续聊")
 	yes := flag.Bool("yes", false, "自动批准高危操作（仅建议在沙箱中使用）")
 	maxTurns := flag.Int("max-turns", 60, "单次任务最大轮数（硬性兜底，0 为不限制）")
+	showThinking := flag.Bool("show-thinking", false, "在终端展示慢思考（Phase 1）的完整内容")
 	flag.Parse()
 	if *prompt == "" {
 		log.Fatal("用法: claw -prompt \"任务\" [-thinking] [-workdir dir] | claw serve")
@@ -96,6 +97,7 @@ func main() {
 	sess := mgr.GetOrCreate(id, a.workDir)
 	reporter := engine.NewTerminalReporter()
 	reporter.AutoApprove = *yes
+	reporter.ShowThinking = *showThinking
 	err := a.eng.Chat(context.Background(), sess, *prompt, reporter)
 	printReport(sess, a.stats)
 	fmt.Printf("\n✨ 任务结束，总耗时 %v；执行回放见 %s\n", time.Since(started).Round(time.Millisecond), filepath.Join(a.workDir, ".claw", "traces"))

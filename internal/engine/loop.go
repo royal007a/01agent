@@ -270,6 +270,9 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		if thinkResp.Content != "" {
 			thinking = thinkResp.Content
 			log.Printf("[Engine] 🧠 内部思考 Trace: %s", textutil.Truncate(thinking, 300, "..."))
+			if tc, ok := reporter.(interface{ OnThinkingContent(context.Context, string) }); ok {
+				tc.OnThinkingContent(ctx, thinking) // 阶段作业：把 Thinking 输出展示给人看（Reporter 自行决定是否显示）
+			}
 			compacted = append(compacted,
 				schema.Message{Role: schema.RoleAssistant, Content: thinking},
 				schema.Message{Role: schema.RoleUser, Content: actionNudge})
