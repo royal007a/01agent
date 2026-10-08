@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
 	"github.com/weberzhao/go-tiny-claw/internal/trace"
@@ -406,5 +408,62 @@ func TestPlanModeBlocksExitWithUncheckedTodos(t *testing.T) {
 	_ = NewAgentEngine(p2, &fakeRegistry{}, false, false).Chat(context.Background(), ctxpkg.NewSession("t3", wd), "做", nil)
 	if p2.calls != 1 {
 		t.Fatalf("非 Plan Mode 不应做 TODO 完成度校验, calls=%d", p2.calls)
+	}
+}
+
+// gateProvider：记录并发进入 Generate 的数量，第一次调用阻塞直到 release 关闭。
+type gateProvider struct {
+	mu      sync.Mutex
+	active  int
+	max     int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *gateProvider) Generate(ctx context.Context, _ []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	g.mu.Lock()
+	g.active++
+	if g.active > g.max {
+		g.max = g.active
+	}
+	g.mu.Unlock()
+	defer func() { g.mu.Lock(); g.active--; g.mu.Unlock() }()
+	g.started <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &schema.Message{Role: schema.RoleAssistant, Content: "完成。"}, nil
+}
+
+// 第 09 讲思考题：同一工作区同一时间只允许一个 Agent 任务执行（跨会话），等待可被取消。
+func TestWorkspaceLockSerializesRunsAcrossSessions(t *testing.T) {
+	wd := t.TempDir()
+	g := &gateProvider{started: make(chan struct{}, 4), release: make(chan struct{})}
+	e := NewAgentEngine(g, &fakeRegistry{}, false, false)
+	e.WorkspaceLocks = keylock.New()
+	done := make(chan error, 2)
+	go func() { done <- e.Chat(context.Background(), ctxpkg.NewSession("a", wd), "任务A", nil) }()
+	<-g.started
+	go func() { done <- e.Chat(context.Background(), ctxpkg.NewSession("b", wd), "任务B", nil) }()
+	select {
+	case <-g.started:
+		t.Fatal("同一工作区的第二个任务不应在第一个结束前开始")
+	case <-time.After(50 * time.Millisecond):
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := e.Chat(ctx, ctxpkg.NewSession("c", wd), "任务C", nil); err == nil {
+		t.Fatal("等待工作区锁时 ctx 超时应返回错误")
+	}
+	close(g.release)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.max != 1 {
+		t.Fatalf("同一工作区的任务发生了并发, max=%d", g.max)
 	}
 }

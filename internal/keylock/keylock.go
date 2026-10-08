@@ -2,10 +2,14 @@
 // 不会因为大量不同的会话 ID 而无限增长（sync.Map + 永久 Mutex 的做法会）。
 package keylock
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
+// entry 用容量为 1 的通道实现互斥，便于支持带 ctx 取消的等待。
 type entry struct {
-	mu   sync.Mutex
+	ch   chan struct{}
 	refs int
 }
 
@@ -21,7 +25,7 @@ func (t *Table) acquire(key string) *entry {
 	defer t.mu.Unlock()
 	e := t.m[key]
 	if e == nil {
-		e = &entry{}
+		e = &entry{ch: make(chan struct{}, 1)}
 		t.m[key] = e
 	}
 	e.refs++
@@ -40,18 +44,32 @@ func (t *Table) release(key string, e *entry) {
 // Lock 阻塞直到拿到 key 的锁，返回解锁函数。
 func (t *Table) Lock(key string) (unlock func()) {
 	e := t.acquire(key)
-	e.mu.Lock()
-	return func() { e.mu.Unlock(); t.release(key, e) }
+	e.ch <- struct{}{}
+	return func() { <-e.ch; t.release(key, e) }
+}
+
+// LockContext 阻塞直到拿到 key 的锁或 ctx 结束；ctx 结束时不占锁、不泄漏条目。
+func (t *Table) LockContext(ctx context.Context, key string) (unlock func(), err error) {
+	e := t.acquire(key)
+	select {
+	case e.ch <- struct{}{}:
+		return func() { <-e.ch; t.release(key, e) }, nil
+	case <-ctx.Done():
+		t.release(key, e)
+		return nil, ctx.Err()
+	}
 }
 
 // TryLock 非阻塞尝试；失败返回 ok=false。
 func (t *Table) TryLock(key string) (unlock func(), ok bool) {
 	e := t.acquire(key)
-	if !e.mu.TryLock() {
+	select {
+	case e.ch <- struct{}{}:
+		return func() { <-e.ch; t.release(key, e) }, true
+	default:
 		t.release(key, e)
 		return nil, false
 	}
-	return func() { e.mu.Unlock(); t.release(key, e) }, true
 }
 
 // Len 当前条目数（测试用）。

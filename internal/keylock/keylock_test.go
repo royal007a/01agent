@@ -1,9 +1,11 @@
 package keylock
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNoLeakAndMutualExclusion(t *testing.T) {
@@ -50,4 +52,23 @@ func TestNoLeakAndMutualExclusion(t *testing.T) {
 	if tb.Len() != 0 {
 		t.Fatal("失败的 TryLock 不应留下条目")
 	}
+}
+
+func TestLockContextCancelDoesNotLeak(t *testing.T) {
+	tb := New()
+	unlock := tb.Lock("ws")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := tb.LockContext(ctx, "ws"); err == nil {
+		t.Fatal("锁被占用时 LockContext 应随 ctx 超时返回错误")
+	}
+	unlock()
+	if tb.Len() != 0 {
+		t.Fatalf("取消的等待者不应留下条目, len=%d", tb.Len())
+	}
+	u2, err := tb.LockContext(context.Background(), "ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2()
 }

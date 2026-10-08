@@ -12,6 +12,7 @@ import (
 
 	"github.com/weberzhao/go-tiny-claw/internal/engine"
 	"github.com/weberzhao/go-tiny-claw/internal/envlock"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/observability"
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
@@ -37,6 +38,9 @@ type Options struct {
 	MaxTokens   int
 	MaxCostCNY  float64
 }
+
+// workspaceLocks 进程级工作区锁表（按工作区绝对路径互斥整个 Run）。
+var workspaceLocks = keylock.New()
 
 // App 一次组装出来的所有组件。
 type App struct {
@@ -113,6 +117,8 @@ func Build(o Options) (*App, error) {
 	registry := observability.NewTimedRegistry(base, tracker.Stats)
 
 	eng := engine.NewAgentEngine(tracker, registry, o.Thinking, o.PlanMode)
+	// 第 09 讲思考题：进程内所有引擎共享一张工作区锁表，HTTP / 飞书 / 多会话对同一目录的任务排队执行
+	eng.WorkspaceLocks = workspaceLocks
 	eng.MaxDuration = o.MaxDuration
 	if eng.MaxDuration == 0 {
 		eng.MaxDuration = envDuration("CLAW_MAX_RUN_SECONDS", 30*time.Minute)

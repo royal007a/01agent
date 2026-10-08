@@ -184,3 +184,17 @@ func TestInjectedLLMStillChecksConfiguredModelIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildSharesWorkspaceLocks(t *testing.T) {
+	a1, err := build(t.TempDir(), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := build(t.TempDir(), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a1.Engine.WorkspaceLocks == nil || a1.Engine.WorkspaceLocks != a2.Engine.WorkspaceLocks {
+		t.Fatal("所有引擎必须共享同一张进程级工作区锁表")
+	}
+}

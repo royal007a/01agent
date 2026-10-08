@@ -14,6 +14,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/runctx"
@@ -50,6 +51,8 @@ type AgentEngine struct {
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
 	MaxTurns int
+	// WorkspaceLocks 非空时，同一工作区的 Run 互斥（第 09 讲思考题）；app.Build 注入进程级共享表。
+	WorkspaceLocks *keylock.Table
 	// Run 级硬预算；0 表示该维度不启用。预算按本次唤醒相对 Session 基线计算。
 	MaxDuration time.Duration
 	MaxTokens   int
@@ -97,6 +100,20 @@ func (e *AgentEngine) Chat(ctx context.Context, session *ctxpkg.Session, prompt 
 func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) (err error) {
 	if reporter == nil {
 		reporter = NopReporter{}
+	}
+	// 第 09 讲思考题：同一工作区同一时间只允许一个 Agent 任务（跨会话/跨渠道）；排队等待可被取消，
+	// 且等待时间不计入本次 Run 的预算。
+	if e.WorkspaceLocks != nil {
+		key := filepath.Clean(session.WorkDir)
+		unlock, ok := e.WorkspaceLocks.TryLock(key)
+		if !ok {
+			reporter.OnMessage(ctx, "⏳ 该工作区正有另一个任务在执行，本任务已排队，前一个结束后自动开始。")
+			var lerr error
+			if unlock, lerr = e.WorkspaceLocks.LockContext(ctx, key); lerr != nil {
+				return fmt.Errorf("等待工作区空闲时被取消: %w", lerr)
+			}
+		}
+		defer unlock()
 	}
 	// 第 19 讲：根 Span 覆盖整个 Run；defer 保证成功/失败都会结束并导出"数字病历"
 	started := time.Now()
