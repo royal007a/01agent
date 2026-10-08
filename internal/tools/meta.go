@@ -178,3 +178,17 @@ func normalizeMeta(m ToolMeta) ToolMeta {
 	}
 	return m
 }
+
+// readOnlyView 把一个已由 ReadOnlyGuard 约束的工具声明为只读（第 17 讲：子 Agent 的 bash 可与其它只读工具并发）。
+// 只能用在挂了 ReadOnlyGuard 的注册表里：只读语义由守卫保证，而不是由这个标记保证。
+type readOnlyView struct{ BaseTool }
+
+func (v readOnlyView) ReadOnly() bool { return true }
+func (v readOnlyView) Meta() ToolMeta {
+	m := metaOf(v.BaseTool)
+	m.SideEffect = "none"
+	return m
+}
+
+// AsReadOnly 见 readOnlyView。
+func AsReadOnly(t BaseTool) BaseTool { return readOnlyView{t} }

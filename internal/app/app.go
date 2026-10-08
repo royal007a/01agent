@@ -145,7 +145,7 @@ func Build(o Options) (*App, error) {
 	// 第 17 讲：只读子智能体（read_file + 白名单 bash），挂成主 Agent 的一个普通工具
 	readOnly := tools.NewRegistry()
 	readOnly.Register(tools.NewReadFileTool(wd))
-	readOnly.Register(tools.NewBashTool(wd))
+	readOnly.Register(tools.AsReadOnly(tools.NewBashTool(wd))) // 由下方 ReadOnlyGuard 保证只读，因此可并发（第 17 讲）
 	readOnly.Register(tools.NewReadSkillTool(wd))
 	readOnly.Use(tools.ReadOnlyGuard())
 	readOnly.Use(permission.Middleware(policy))

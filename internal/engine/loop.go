@@ -268,7 +268,11 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 	// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
 	// RepairToolPairs：会话若在工具执行中途被重启，历史里会残留"有调用没结果"，补齐后才能合法发送
 	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemoryBudget(e.WorkingMemoryLimit, e.WorkingMemoryMaxChars))...)
-	compacted := e.compactorFor(session.ID, turnSpan).Compact(contextHistory)
+	_, compactSpan := trace.Start(ctx, "Context.Compact") // 第 19 讲：压缩作为独立 Span，复盘时能看到何时、压了多少
+	compacted := e.compactorFor(session.ID, compactSpan).Compact(contextHistory)
+	compactSpan.Set("chars_before", ctxpkg.EstimateLength(contextHistory))
+	compactSpan.Set("chars_after", ctxpkg.EstimateLength(compacted))
+	compactSpan.End()
 	turnSpan.Set("context_message_count", len(compacted))
 	turnSpan.Set("context_chars", ctxpkg.EstimateLength(compacted))
 	if len(compacted) > 0 && ctxpkg.EstimateLength(compacted) < ctxpkg.EstimateLength(contextHistory) {

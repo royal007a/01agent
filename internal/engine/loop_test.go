@@ -295,6 +295,9 @@ func TestTraceTree(t *testing.T) {
 	if root == nil || root.Name != "Agent.Run" || root.Get("turns") != 2 {
 		t.Fatalf("根 Span 异常: %+v", root)
 	}
+	if root.Count("Context.Compact") != 2 { // 第 19 讲：每轮的上下文压缩都有独立 Span
+		t.Fatalf("每轮应有一个 Context.Compact Span, got %d", root.Count("Context.Compact"))
+	}
 	if root.Count("Turn-1") != 1 || root.Count("Subagent.Run") != 2 || root.Count("LLM.Action") != 2+4 {
 		t.Fatalf("树结构: turns=%d sub=%d llm=%d", root.Count("Turn-1"), root.Count("Subagent.Run"), root.Count("LLM.Action"))
 	}

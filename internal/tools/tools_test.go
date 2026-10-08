@@ -489,3 +489,16 @@ func TestReadSkillTool(t *testing.T) {
 		t.Fatal("read_skill 必须是只读工具（可并发、子 Agent 可用）")
 	}
 }
+
+// 第 17 讲：子 Agent 的 bash 受 ReadOnlyGuard 约束后应视为只读，才能与其它只读工具并发执行。
+func TestAsReadOnlyMarksGuardedTool(t *testing.T) {
+	r := NewRegistry()
+	r.Register(AsReadOnly(NewBashTool(t.TempDir())))
+	r.Use(ReadOnlyGuard())
+	if !r.IsReadOnly("bash") {
+		t.Fatal("受守卫的 bash 应标记为只读")
+	}
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "bash", Arguments: []byte(`{"command":"echo x > f"}`)}); !got.IsError {
+		t.Fatal("只读标记不能绕过守卫：写操作仍必须被拦截")
+	}
+}
