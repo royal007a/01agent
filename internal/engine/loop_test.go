@@ -364,3 +364,47 @@ func (s *stubbornTalker) Generate(context.Context, []schema.Message, []schema.To
 	s.n++
 	return &schema.Message{Role: schema.RoleAssistant, Content: "让我先看看。"}, nil
 }
+
+// todoProvider：第一次直接宣布完成；看到 TODO 未完成提醒后把 TODO.md 勾完再结束。
+type todoProvider struct {
+	wd    string
+	calls int
+}
+
+func (p *todoProvider) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	p.calls++
+	last := msgs[len(msgs)-1]
+	if strings.Contains(last.Content, "TODO.md 中仍有") {
+		_ = os.WriteFile(filepath.Join(p.wd, "TODO.md"), []byte("- [x] 写代码\n- [x] 写测试\n"), 0o644)
+		return &schema.Message{Role: schema.RoleAssistant, Content: "都做完了。"}, nil
+	}
+	return &schema.Message{Role: schema.RoleAssistant, Content: "任务完成。"}, nil
+}
+
+// 第 02 讲作者答疑"完成度校验"：Plan Mode 下 TODO.md 还有 - [ ] 时模型想退出，Harness 拦截并提醒。
+func TestPlanModeBlocksExitWithUncheckedTodos(t *testing.T) {
+	wd := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [x] 写代码\n- [ ] 写测试\n"), 0o644)
+	p := &todoProvider{wd: wd}
+	if err := NewAgentEngine(p, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("t", wd), "做完它", nil); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls != 2 {
+		t.Fatalf("未完成的 TODO 应拦截一次退出，模型调用次数=%d", p.calls)
+	}
+	// 永远不勾 TODO 的模型：有限次提醒后正常结束，不死循环
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [ ] 永远做不完\n"), 0o644)
+	stub := &stubbornTalker{}
+	if err := NewAgentEngine(stub, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("t2", wd), "做", nil); err != nil {
+		t.Fatal(err)
+	}
+	if stub.n > 1+2+2 { // 首轮 + 最多 2 次防早退 + 最多 2 次 TODO 提醒
+		t.Fatalf("TODO 提醒必须有上限, calls=%d", stub.n)
+	}
+	// 非 Plan Mode 不读 TODO.md
+	p2 := &todoProvider{wd: wd}
+	_ = NewAgentEngine(p2, &fakeRegistry{}, false, false).Chat(context.Background(), ctxpkg.NewSession("t3", wd), "做", nil)
+	if p2.calls != 1 {
+		t.Fatalf("非 Plan Mode 不应做 TODO 完成度校验, calls=%d", p2.calls)
+	}
+}

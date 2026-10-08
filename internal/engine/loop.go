@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -138,6 +139,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 
 	nudges := 0
 	knowledgeChecked := false
+	todoNudges := 0
 	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && e.durationExceeded(started) {
@@ -172,6 +174,16 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 				log.Printf("[Engine] ⚠️ 模型宣布要行动却没有调用工具，注入防早退提醒 (%d/%d)", nudges, e.EarlyExitNudges)
 				session.Append(schema.Message{Role: schema.RoleUser, Content: earlyExitNudge})
 				continue
+			}
+			// 第 02 讲作者答疑"完成度校验"：Plan Mode 下 TODO.md 仍有未勾选项时，模型说完成不算数
+			if e.PlanMode && todoNudges < maxTodoNudges {
+				if pending := uncheckedTodos(session.WorkDir); len(pending) > 0 {
+					todoNudges++
+					root.Add("todo_nudges", 1)
+					log.Printf("[Engine] 📋 TODO.md 仍有 %d 项未完成，拦截退出 (%d/%d)", len(pending), todoNudges, maxTodoNudges)
+					session.Append(schema.Message{Role: schema.RoleUser, Content: todoNudge(pending)})
+					continue
+				}
 			}
 			// 内层循环：交付前清点本轮知识（每次唤醒最多提醒一次，模型确认 none 也算清点过）
 			if e.Knowledge != nil && !knowledgeChecked && e.Knowledge.NeedsCheckpoint(session.ID, runStart) {
@@ -457,4 +469,37 @@ func (e *AgentEngine) executeToolsWith(ctx context.Context, registry tools.Regis
 	wg.Wait()
 	log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 	return observations
+}
+
+// maxTodoNudges 每次唤醒最多因 TODO 未完成拦截退出的次数；超过后放行，避免与模型无限拉锯。
+const maxTodoNudges = 2
+
+// uncheckedTodos 读取工作区根目录 TODO.md 中未勾选的条目（经 os.Root，不跟随越界路径）。
+func uncheckedTodos(workDir string) []string {
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	b, err := root.ReadFile("TODO.md")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "- [ ]") || strings.HasPrefix(t, "* [ ]") {
+			out = append(out, strings.TrimSpace(t[5:]))
+		}
+	}
+	return out
+}
+
+func todoNudge(pending []string) string {
+	shown := pending
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	return fmt.Sprintf("[系统提醒] TODO.md 中仍有 %d 项未完成：%s。任务尚未全部完成，请继续执行；如果某项确实不再需要，请先在 TODO.md 中把它勾掉并注明取消原因，再给出最终结论。",
+		len(pending), strings.Join(shown, "；"))
 }
