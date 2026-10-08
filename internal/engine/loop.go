@@ -3,6 +3,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -56,6 +57,8 @@ type AgentEngine struct {
 	// ContextWindowTokens 模型上下文窗口（token）。>0 时压缩阈值按真实 PromptTokens 自适应（第 12 讲思考题）
 	ContextWindowTokens int
 	tokenRatios         sync.Map // sessionID -> 每 token 对应的字符数（来自上一次请求的真实 Usage）
+	spiralMu            sync.Mutex
+	spiral              map[string]int // sessionID -> 连续只读调用次数（第 15 讲作者答疑：探索螺旋）
 	slotsOnce           sync.Once
 	slots               chan struct{}
 	// WorkspaceLocks 非空时，同一工作区的 Run 互斥（第 09 讲思考题）；app.Build 注入进程级共享表。
@@ -163,6 +166,9 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 			root.Set("plan_archived", dir)
 		}
 	}
+	e.spiralMu.Lock()
+	delete(e.spiral, session.ID)
+	e.spiralMu.Unlock()
 	e.injector.Forget(session.ID) // 新的人类指令，重置死循环监控与熔断状态
 
 	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
@@ -337,6 +343,10 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		turnSpan.Set("reminder_injected", true)
 		reporter.OnMessage(ctx, "⚠️ 检测到重复失败，已注入 System Reminder 干预。")
 	}
+	if m := e.checkExplorationSpiral(session.ID, actionResp.ToolCalls); m != nil {
+		session.Append(*m)
+		turnSpan.Set("exploration_spiral_reminder", true)
+	}
 	return false, nil
 }
 
@@ -433,7 +443,54 @@ const MaxParallelTools = 5
 // 只要混入任何有副作用的工具（write/edit/bash），就退化为按顺序串行执行。
 // 两种路径都写入预分配切片的固定下标，天然保序、无需加锁。
 func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall, reporter Reporter) []schema.Message {
-	return e.executeToolsWith(ctx, e.registry, calls, reporter)
+	obs := e.executeToolsWith(ctx, e.registry, calls, reporter)
+	if e.PlanMode {
+		for i, c := range calls {
+			if !obs[i].IsError && updatesTodo(c) {
+				obs[i].Content += todoProgressNudge
+			}
+		}
+	}
+	return obs
+}
+
+// todoProgressNudge 第 13 讲作者答疑：勾选 TODO 后先停下来总结进展，再进入下一项，防止闷头连跑丢失全局视角。
+const todoProgressNudge = "\n\n[系统提醒]：TODO 状态更新已保存。请在继续下一项之前，先用一两句话总结你刚刚完成的进展，再接着执行。"
+
+func updatesTodo(c schema.ToolCall) bool {
+	if c.Name != "edit_file" && c.Name != "write_file" {
+		return false
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	return json.Unmarshal(c.Arguments, &in) == nil && filepath.Clean(in.Path) == "TODO.md"
+}
+
+// ExplorationSpiralThreshold 连续只读工具调用达到该次数且没有任何写动作时，提醒模型收敛（第 15 讲作者答疑）。
+const ExplorationSpiralThreshold = 10
+
+const explorationSpiralReminder = "[系统提醒] 你已经连续进行了大量只读探索（读文件、搜索、ls 等），却还没有任何实际修改或产出。请停下来：先总结目前已经确认的事实，判断信息是否已经足够；足够就开始动手，不够就明确说出还缺哪一条关键信息再定向查找，不要继续漫无目的地浏览。"
+
+// checkExplorationSpiral 统计会话内连续的只读调用；出现写动作即清零，达到阈值返回一次提醒并清零。
+func (e *AgentEngine) checkExplorationSpiral(sessionID string, calls []schema.ToolCall) *schema.Message {
+	e.spiralMu.Lock()
+	defer e.spiralMu.Unlock()
+	if e.spiral == nil {
+		e.spiral = map[string]int{}
+	}
+	for _, c := range calls {
+		if !e.registry.IsReadOnly(c.Name) {
+			delete(e.spiral, sessionID)
+			return nil
+		}
+	}
+	e.spiral[sessionID] += len(calls)
+	if e.spiral[sessionID] < ExplorationSpiralThreshold {
+		return nil
+	}
+	delete(e.spiral, sessionID)
+	return &schema.Message{Role: schema.RoleUser, Content: explorationSpiralReminder}
 }
 
 // executeToolsWith 使用指定注册表执行（子智能体用受限注册表）。

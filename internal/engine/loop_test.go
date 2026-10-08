@@ -567,3 +567,42 @@ func TestPlanModeArchivesCompletedPlan(t *testing.T) {
 		t.Fatal("未完成的 TODO.md 不能被归档")
 	}
 }
+
+// pathRegistry：write/edit 视为写操作，其余只读；记录调用。
+type pathRegistry struct{ fakeRegistry }
+
+func (p *pathRegistry) IsReadOnly(name string) bool { return name != "edit_file" && name != "write_file" }
+
+// 第 13 讲作者答疑：模型更新 TODO.md 后，在工具结果里追加"先总结进展"的提醒。
+func TestTodoUpdateAppendsProgressNudge(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &pathRegistry{}, false, true)
+	obs := e.executeTools(context.Background(), []schema.ToolCall{
+		{ID: "1", Name: "edit_file", Arguments: []byte(`{"path":"TODO.md","old_text":"- [ ] a","new_text":"- [x] a"}`)},
+		{ID: "2", Name: "edit_file", Arguments: []byte(`{"path":"main.go","old_text":"a","new_text":"b"}`)},
+	}, NopReporter{})
+	if !strings.Contains(obs[0].Content, "总结") || strings.Contains(obs[1].Content, "总结") {
+		t.Fatalf("只有 TODO.md 的成功更新才追加进展提醒: %q / %q", obs[0].Content, obs[1].Content)
+	}
+}
+
+// 第 15 讲作者答疑：连续大量只读调用却没有任何写动作（"探索螺旋"），注入提醒。
+func TestExplorationSpiralReminder(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &pathRegistry{}, false, false)
+	var hits int
+	for i := 0; i < ExplorationSpiralThreshold; i++ {
+		calls := []schema.ToolCall{{ID: fmt.Sprint(i), Name: "read_file", Arguments: []byte(fmt.Sprintf(`{"path":"f%d.go"}`, i))}}
+		if m := e.checkExplorationSpiral("s", calls); m != nil {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("达到阈值时应恰好提醒一次, hits=%d", hits)
+	}
+	// 出现写动作后重新计数
+	e.checkExplorationSpiral("s", []schema.ToolCall{{Name: "edit_file"}})
+	for i := 0; i < ExplorationSpiralThreshold-1; i++ {
+		if m := e.checkExplorationSpiral("s", []schema.ToolCall{{Name: "read_file"}}); m != nil {
+			t.Fatal("写动作后计数应清零")
+		}
+	}
+}
