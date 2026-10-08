@@ -86,22 +86,7 @@ func (r *TerminalReporter) RequestApproval(ctx context.Context, req permission.A
 	}
 	r.approveMu.Lock()
 	defer r.approveMu.Unlock()
-	r.readOnce.Do(func() {
-		r.lines = make(chan string, 8)
-		go func() { // 单一读取协程：超时/取消后迟到的输入不会被下一次审批误用（提问前会先清空）
-			br := bufio.NewReader(in)
-			for {
-				line, err := br.ReadString('\n')
-				if line != "" {
-					r.lines <- line
-				}
-				if err != nil {
-					close(r.lines)
-					return
-				}
-			}
-		}()
-	})
+	r.ensureReader(in)
 	for drained := false; !drained; { // 丢弃上一次审批超时后才到达的陈旧输入
 		select {
 		case _, ok := <-r.lines:
@@ -135,6 +120,37 @@ func (r *TerminalReporter) RequestApproval(ctx context.Context, req permission.A
 	case <-ctx.Done():
 		return false, "任务已取消，审批作废：" + ctx.Err().Error()
 	}
+}
+
+// ensureReader 启动唯一的 stdin 读取协程：审批与交互式对话（claw -i）共用同一行输入源，互不抢读。
+func (r *TerminalReporter) ensureReader(in io.Reader) {
+	r.readOnce.Do(func() {
+		r.lines = make(chan string, 8)
+		go func() {
+			br := bufio.NewReader(in)
+			for {
+				line, err := br.ReadString('\n')
+				if line != "" {
+					r.lines <- line
+				}
+				if err != nil {
+					close(r.lines)
+					return
+				}
+			}
+		}()
+	})
+}
+
+// ReadLine 读取下一行用户输入（第 21 讲作者答疑：多轮交互模式）；输入结束返回 ok=false。
+func (r *TerminalReporter) ReadLine() (string, bool) {
+	in := r.In
+	if in == nil {
+		in = os.Stdin
+	}
+	r.ensureReader(in)
+	line, ok := <-r.lines
+	return strings.TrimRight(line, "\r\n"), ok
 }
 
 var _ permission.Approver = (*TerminalReporter)(nil)

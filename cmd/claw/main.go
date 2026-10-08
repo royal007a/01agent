@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	clawapp "github.com/weberzhao/go-tiny-claw/internal/app"
@@ -74,9 +75,10 @@ func main() {
 	yes := flag.Bool("yes", false, "自动批准高危操作（仅建议在沙箱中使用）")
 	maxTurns := flag.Int("max-turns", 60, "单次任务最大轮数（硬性兜底，0 为不限制）")
 	showThinking := flag.Bool("show-thinking", false, "在终端展示慢思考（Phase 1）的完整内容")
+	interactive := flag.Bool("i", false, "多轮交互模式：逐行读取指令，复用同一会话（第 21 讲作者答疑）；可与 -prompt 连用作为第一条指令")
 	flag.Parse()
-	if *prompt == "" {
-		log.Fatal("用法: claw -prompt \"任务\" [-thinking] [-workdir dir] | claw serve")
+	if *prompt == "" && !*interactive {
+		log.Fatal("用法: claw -prompt \"任务\" [-thinking] [-workdir dir] | claw -i | claw serve")
 	}
 	a := buildEngine(*workDir, *thinking, *planMode)
 	a.eng.MaxTurns = *maxTurns
@@ -85,8 +87,6 @@ func main() {
 	fmt.Printf("📁 锁定工作区: %s\n", a.workDir)
 	fmt.Printf("🧠 慢思考: %v | 📋 Plan Mode: %v | ⛔ 最大轮数: %d\n", *thinking, *planMode, *maxTurns)
 	fmt.Println("==================================================")
-	fmt.Printf("\n🎯 收到任务: %s\n\n", *prompt)
-	started := time.Now()
 	mgr := ctxpkg.GlobalSessionMgr
 	id := *sessionID
 	if id != "" {
@@ -98,10 +98,40 @@ func main() {
 	reporter := engine.NewTerminalReporter()
 	reporter.AutoApprove = *yes
 	reporter.ShowThinking = *showThinking
-	err := a.eng.Chat(context.Background(), sess, *prompt, reporter)
-	printReport(sess, a.stats)
-	fmt.Printf("\n✨ 任务结束，总耗时 %v；执行回放见 %s\n", time.Since(started).Round(time.Millisecond), filepath.Join(a.workDir, ".claw", "traces"))
-	if err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
+	runOnce := func(task string) error {
+		fmt.Printf("\n🎯 收到任务: %s\n\n", task)
+		started := time.Now()
+		err := a.eng.Chat(context.Background(), sess, task, reporter)
+		printReport(sess, a.stats)
+		fmt.Printf("\n✨ 任务结束，耗时 %v；执行回放见 %s\n", time.Since(started).Round(time.Millisecond), filepath.Join(a.workDir, ".claw", "traces"))
+		return err
+	}
+	if !*interactive {
+		if err := runOnce(*prompt); err != nil {
+			log.Fatalf("引擎运行崩溃: %v", err)
+		}
+		return
+	}
+	if *prompt != "" {
+		if err := runOnce(*prompt); err != nil {
+			log.Printf("❌ %v", err)
+		}
+	}
+	for {
+		fmt.Print("\n💬 请输入下一条指令（exit 退出）> ")
+		line, ok := reporter.ReadLine()
+		if !ok {
+			return
+		}
+		task := strings.TrimSpace(line)
+		switch task {
+		case "":
+			continue
+		case "exit", "quit", "/exit":
+			return
+		}
+		if err := runOnce(task); err != nil {
+			log.Printf("❌ %v", err) // 交互模式下单条指令失败不退出
+		}
 	}
 }
