@@ -91,7 +91,7 @@ func RenderPrompt(workDir string) string {
 			b.WriteString(l + "\n")
 		}
 	}
-	section("必须遵守的规则（用户或项目已裁决，冲突时以此为准）", rules)
+	section("必须遵守的规则（用户或项目已裁决；与 AGENTS.md 冲突时以 AGENTS.md 为准）", rules)
 	section("已做出的决策", decisions)
 	section("用户偏好（倾向，不是定论；与规则冲突时以规则为准）", prefs)
 	section("近期发现（可能随代码变化过期，使用前可再核实）", discs)

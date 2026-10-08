@@ -135,6 +135,35 @@ make undeploy
 | 16 | 飞书内容用 `TrimPrefix("{\"text\":\"")` 剥壳 | 换行/引号转义错乱，@ 占位符残留 | JSON 解析 + 去 `@_user_N`；忽略机器人消息；事件去重 |
 | 17 | 第 16 讲飞书 bot 绑定单个 Session，`b.r` 在多协程间竞争 | 所有群共享一段记忆；审批消息发错群 | 每个 chat_id 一个 Session；Reporter 按运行透传 |
 | 18 | 只有 Reminder，没有兜底 | 真机：用户要求"重试 5 次"时模型无视提醒继续重试 | 提醒后同一动作在本次唤醒内熔断（不再真实执行），另有 MaxTurns 硬预算 |
+| 19 | P0 生产化扩展（981b3b5/bec81ca）| 课程没有 Run 级预算与统一工具契约 | Run 预算（时长默认 30min，`CLAW_MAX_RUN_SECONDS/TOKENS/COST_CNY`）、`ToolMeta`（副作用/超时/输出上限）、Registry 统一参数校验（required/type/enum）与头+尾输出截断、跨会话工作区写锁 |
+| 20 | 截断与校验的叠加回归 | Registry 的统一截断把 bash/read_file 自带的截断再截一刀；统一校验报"参数校验失败"不再命中第 14 讲的自愈规则 | 自带截断的工具在 `Meta()` 里声明 `自身上限+1KB`，bash 的截断说明计入 8000 字节预算；自愈规则同时匹配"参数校验失败" |
+
+### 课程对齐（2026-10-08，分支 feature/course-align）
+
+逐讲（含思考题与作者答疑）复核后补齐的差距：
+
+| 讲 | 课程要求 | 实现 |
+|---|---|---|
+| 02 答疑 | 完成度校验：Plan Mode 下 TODO 未勾完不许退出 | 交付前读取 `TODO.md` 的 `- [ ]`，每次唤醒最多拦截 2 次 |
+| 07 | L4 先 `TrimSpace(old_text)` 再逐行匹配 | 改为 `TrimSpace`（原实现只剥换行，首尾纯空白行匹配失败） |
+| 08 思考题 | 全局并发上限 | 引擎级信号量，跨批次/会话/子 Agent 共享；`spawn_subagent` 只做编排不占槽位，避免嵌套死锁 |
+| 09 思考题 | 同一目录同一时间只允许一个任务 | 进程级工作区锁表（`app.workspaceLocks`）互斥整个 Run，排队可取消、等待不计预算 |
+| 10 思考题 | Skill 懒加载 | 技能正文合计 >4KB 时 System Prompt 只列名称+触发条件，正文用 `read_skill` 读取；小于阈值保持课程的渴望式加载 |
+| 11 思考题 | Working Memory 字符上限 | `WorkingMemoryMaxChars`（默认 120000），最新一条总会保留 |
+| 12 思考题 / 答疑 | 阈值按真实 Token 自适应；远期长参数掩码 | 设置 `CLAW_CONTEXT_TOKENS` 后阈值 = 窗口×0.6×(字符/Token)，比例由上次请求的真实 `PromptTokens` 校准；保护区外 >500 字节的 ToolCall 参数掩码长字符串、保留 path 等短字段，且只作用于请求副本 |
+| 13 答疑 | 完成后归档、勾选后总结 | 新任务开始前把全部勾选的 PLAN/TODO 移到 `.claw/archive/<时间>_task/`；成功更新 `TODO.md` 后在工具结果里追加"先总结进展" |
+| 15 答疑 | 探索螺旋检测 | 连续 10 次只读调用且无写动作时注入提醒，出现写动作清零 |
+| 16/22 | 群里直接回复 `approve <id>` | 审批与 `/reset` 口令先于"群聊需 @"的意图过滤处理（事件去重仍生效） |
+| 16/21 | 终端审批 | 10 分钟超时、响应取消、并行子 Agent 串行提问并丢弃陈旧输入 |
+| 17 | 子 Agent 只读工具并发 | 受 ReadOnlyGuard 约束的 bash 用 `tools.AsReadOnly` 标记为只读 |
+| 18 思考题 | 只计物理执行耗时；账单可续 | Registry 回填 `ExecDuration`（不含审批/写锁等待）；会话累计账单存 `<jsonl>.usage.json`，重启恢复 |
+| 19 | 压缩可复盘 | 独立 `Context.Compact` Span（压缩前后字符数、自适应阈值） |
+| 20 | Fail-to-Pass 与综合得分 | 判卷脚本必须在 Agent 动手前失败（守卫型用 `no_precheck`）；报告新增每题得分与平均分（60 底分 + 轮数/成本/耗时效率分） |
+| 21 答疑 | 多轮交互 | `claw -i`：逐行读取指令复用同一会话，与终端审批共用一个输入源 |
+| 22 | 汇报附成本；改文件须审批 | 飞书任务结束附本次 Token/费用；知识归位会直接写工作区，工作区可在 `.claw/knowledge.json` 设 `"disabled": true`（或 `CLAW_NO_KNOWLEDGE=1`），AgentOps 演示默认关闭 |
+| 阶段作业 | 展示 Thinking 输出 | Reporter 可实现 `OnThinkingContent`；`claw -show-thinking` 打印 Phase 1 全文 |
+
+刻意未实现（思考题里的可选扩展，记录在此避免误以为遗漏）：Phase 1/2 之间的自审环节（03）、流式输出与自适应慢思考（04）、同轮只读调用缓存（04 答疑）、消费 `ToolMeta.Retryable` 的自动重试与大输出卸载到文件（05）、小模型兜底解析未知报错（14）、新消息打断正在运行的任务（16 答疑，现为排队）。CLI 默认使用内存会话 `cli`、Plan Mode 默认关闭（课程默认持久会话 + Plan Mode 开），需要时用 `-session`/`-plan`。第 13 讲 STEP 2 去掉了"或 bash 的 sed"兜底（与第 07 讲 sed 脆弱的结论一致）。注入的动态知识与 AGENTS.md 冲突时，以 AGENTS.md 为准。
 
 ## 6. 验证记录
 
