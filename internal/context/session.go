@@ -93,6 +93,44 @@ func (s *Session) RecordUsage(prompt, completion int, cost float64) {
 	s.TotalCompletionTokens += completion
 	s.TotalCost += cost
 	s.UsageKnown = true
+	if s.logPath != "" {
+		s.saveUsageLocked()
+	}
+}
+
+// usageFile 持久化会话累计账单（第 18/21 讲：-session 续聊时财务报表不能从 0 开始）。
+// 单独存一份而不是从历史消息里汇总：Thinking 阶段与子 Agent 的消耗不会进入会话历史。
+type usageFile struct {
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	CostCNY          float64 `json:"cost_cny"`
+}
+
+func (s *Session) saveUsageLocked() {
+	b, err := json.Marshal(usageFile{s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalCost})
+	if err != nil {
+		return
+	}
+	tmp := s.logPath + ".usage.tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+		if err := os.Rename(tmp, s.logPath+".usage.json"); err != nil {
+			log.Printf("[Session] 保存会话 %s 账单失败: %v", s.ID, err)
+		}
+	}
+}
+
+func (s *Session) loadUsage() {
+	b, err := os.ReadFile(s.logPath + ".usage.json")
+	if err != nil {
+		return
+	}
+	var u usageFile
+	if json.Unmarshal(b, &u) != nil {
+		log.Printf("[Session] 会话 %s 的账单文件损坏，忽略", s.ID)
+		return
+	}
+	s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalCost = u.PromptTokens, u.CompletionTokens, u.CostCNY
+	s.UsageKnown = true
 }
 
 // UsageSnapshot 线程安全地读取累计账单。
@@ -160,6 +198,7 @@ func (sm *SessionManager) GetOrCreate(id, workDir string) *Session {
 				}
 				log.Printf("[Session] ⚠️ 会话 %s 的历史文件损坏（%v），已保留前 %d 条合法消息，原文件备份为 %s", id, err, len(msgs), backup)
 			}
+			sess.loadUsage()
 			if len(msgs) > 0 {
 				sess.history = msgs
 				log.Printf("[Session] 从磁盘恢复会话 %s：%d 条消息", id, len(msgs))

@@ -1,6 +1,7 @@
 package context
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,5 +229,18 @@ func TestRecoveryCoversRegistrySchemaValidation(t *testing.T) {
 		if got := rm.AnalyzeAndInject("read_file", raw); !strings.Contains(got, "系统救援指南") {
 			t.Errorf("schema 校验错误缺少救援提示: %q", got)
 		}
+	}
+}
+
+// 第 18/21 讲：-session 续聊时财务报表要包含重启前的累计消耗，而不是从 0 开始。
+func TestSessionUsageSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSessionManager(dir).GetOrCreate("bill", t.TempDir())
+	s.RecordUsage(100, 50, 0.25)
+	s.RecordUsage(10, 5, 0.05)
+	r := NewSessionManager(dir).GetOrCreate("bill", t.TempDir())
+	p, c, cost := r.UsageSnapshot()
+	if p != 110 || c != 55 || math.Abs(cost-0.30) > 1e-9 || !r.UsageAvailable() {
+		t.Fatalf("重启后账单丢失: p=%d c=%d cost=%f known=%v", p, c, cost, r.UsageAvailable())
 	}
 }
