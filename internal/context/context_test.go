@@ -244,3 +244,32 @@ func TestSessionUsageSurvivesRestart(t *testing.T) {
 		t.Fatalf("重启后账单丢失: p=%d c=%d cost=%f known=%v", p, c, cost, r.UsageAvailable())
 	}
 }
+
+// 第 10 讲思考题：技能多了以后，System Prompt 只放名称+触发条件，正文由 read_skill 按需加载。
+func TestSkillsLazyLoadWhenLarge(t *testing.T) {
+	wd := t.TempDir()
+	write := func(name, body string) {
+		p := filepath.Join(wd, ".claw", "skills", name, "SKILL.md")
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte("---\nname: "+name+"\ndescription: 当需要 "+name+" 时\n---\n"+body), 0o644)
+	}
+	write("small", "小技能正文")
+	l := NewSkillLoader(wd)
+	if got := l.Render(); !strings.Contains(got, "小技能正文") {
+		t.Fatalf("技能总量小时保持第 10 讲的渴望式加载: %q", got)
+	}
+	write("huge", strings.Repeat("超长运维手册。", 2000))
+	got := l.Render()
+	if strings.Contains(got, "超长运维手册") || strings.Contains(got, "小技能正文") {
+		t.Fatal("技能总量超过阈值后正文不应进入 System Prompt")
+	}
+	if !strings.Contains(got, "huge") || !strings.Contains(got, "当需要 huge 时") || !strings.Contains(got, "read_skill") {
+		t.Fatalf("懒加载模式应列出名称、触发条件并提示用 read_skill: %q", got)
+	}
+	if body, ok := l.Body("huge"); !ok || !strings.Contains(body, "超长运维手册") {
+		t.Fatal("Body 应能按名称取回技能正文")
+	}
+	if _, ok := l.Body("../etc"); ok {
+		t.Fatal("未知技能名不应返回内容")
+	}
+}

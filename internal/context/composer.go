@@ -77,7 +77,7 @@ func (c *PromptComposer) Build() schema.Message {
 	// 3.5 跨会话沉淀的知识（动态知识更新的闭环：规则、决策、偏好、发现）
 	b.WriteString(knowledge.RenderPrompt(c.workDir))
 	// 4. 技能外挂
-	b.WriteString(c.skillLoader.LoadAll())
+	b.WriteString(c.skillLoader.Render())
 	return schema.Message{Role: schema.RoleSystem, Content: b.String()}
 }
 

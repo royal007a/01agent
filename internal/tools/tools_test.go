@@ -471,3 +471,21 @@ func TestFuzzyReplaceL4TrimsWhitespaceOnlyEdges(t *testing.T) {
 		t.Fatalf("替换结果不对: %q", got)
 	}
 }
+
+func TestReadSkillTool(t *testing.T) {
+	wd := t.TempDir()
+	p := filepath.Join(wd, ".claw", "skills", "ops", "SKILL.md")
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.WriteFile(p, []byte("---\nname: ops\ndescription: 排障\n---\n先看 error.log"), 0o644)
+	r := NewRegistry()
+	r.Register(NewReadSkillTool(wd))
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "read_skill", Arguments: []byte(`{"name":"ops"}`)}); got.IsError || got.Output != "先看 error.log" {
+		t.Fatalf("read_skill 应返回技能正文: %#v", got)
+	}
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "read_skill", Arguments: []byte(`{"name":"nope"}`)}); !got.IsError {
+		t.Fatal("未知技能应报错")
+	}
+	if !r.IsReadOnly("read_skill") {
+		t.Fatal("read_skill 必须是只读工具（可并发、子 Agent 可用）")
+	}
+}

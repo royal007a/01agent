@@ -96,6 +96,7 @@ func Build(o Options) (*App, error) {
 	base.Register(tools.NewWriteFileTool(wd))
 	base.Register(tools.NewBashTool(wd))
 	base.Register(tools.NewEditFileTool(wd))
+	base.Register(tools.NewReadSkillTool(wd)) // 第 10 讲思考题：技能多时 System Prompt 只放元数据，正文按需读取
 	stateRoot := os.Getenv("CLAW_HOME")
 	if stateRoot == "" && o.StateDir == "" {
 		var e error
@@ -143,6 +144,7 @@ func Build(o Options) (*App, error) {
 	readOnly := tools.NewRegistry()
 	readOnly.Register(tools.NewReadFileTool(wd))
 	readOnly.Register(tools.NewBashTool(wd))
+	readOnly.Register(tools.NewReadSkillTool(wd))
 	readOnly.Use(tools.ReadOnlyGuard())
 	readOnly.Use(permission.Middleware(policy))
 	base.Register(tools.NewSubagentTool(eng, observability.NewTimedRegistry(readOnly, tracker.Stats)))
