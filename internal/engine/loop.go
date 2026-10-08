@@ -536,3 +536,6 @@ func todoNudge(pending []string) string {
 	return fmt.Sprintf("[系统提醒] TODO.md 中仍有 %d 项未完成：%s。任务尚未全部完成，请继续执行；如果某项确实不再需要，请先在 TODO.md 中把它勾掉并注明取消原因，再给出最终结论。",
 		len(pending), strings.Join(shown, "；"))
 }
+
+// Registry 返回引擎挂载的工具注册表（装配校验与测试用）。
+func (e *AgentEngine) Registry() tools.Registry { return e.registry }

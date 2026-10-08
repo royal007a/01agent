@@ -133,7 +133,7 @@ func Build(o Options) (*App, error) {
 	}
 
 	// 动态知识更新：内层 record_knowledge 写暂存区（Harness 状态目录），外层在 Run 结束后按工作区知识布局归位
-	if !o.NoKnowledge {
+	if !o.NoKnowledge && !knowledge.LoadLayout(wd).Disabled && os.Getenv("CLAW_NO_KNOWLEDGE") != "1" {
 		km := knowledge.NewManager(filepath.Join(stateDir(o.StateDir), "knowledge", "inbox"))
 		base.Register(tools.NewRecordKnowledgeTool(km.Inbox))
 		eng.Knowledge = km

@@ -198,3 +198,28 @@ func TestBuildSharesWorkspaceLocks(t *testing.T) {
 		t.Fatal("所有引擎必须共享同一张进程级工作区锁表")
 	}
 }
+
+// 第 22 讲：AgentOps 工作区"改任何文件都要审批"，知识归位会绕开审批直接写工作区，
+// 所以工作区可以在 .claw/knowledge.json 里声明 disabled，此时不挂 record_knowledge、不归位。
+func TestWorkspaceCanDisableKnowledge(t *testing.T) {
+	hasTool := func(a *App) bool {
+		for _, d := range a.Engine.Registry().GetAvailableTools() {
+			if d.Name == "record_knowledge" {
+				return true
+			}
+		}
+		return false
+	}
+	on := t.TempDir()
+	a, err := Build(Options{WorkDir: on, LLM: servedModel("m"), StateDir: t.TempDir()})
+	if err != nil || !hasTool(a) || a.Engine.Knowledge == nil {
+		t.Fatalf("默认应启用知识更新: err=%v", err)
+	}
+	off := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(off, ".claw"), 0o755)
+	_ = os.WriteFile(filepath.Join(off, ".claw", "knowledge.json"), []byte(`{"disabled":true}`), 0o644)
+	b, err := Build(Options{WorkDir: off, LLM: servedModel("m"), StateDir: t.TempDir()})
+	if err != nil || hasTool(b) || b.Engine.Knowledge != nil {
+		t.Fatalf("工作区声明 disabled 后不应挂载知识更新: err=%v", err)
+	}
+}
