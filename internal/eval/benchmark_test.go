@@ -62,7 +62,7 @@ func TestRunSuiteAndReport(t *testing.T) {
 	baseline.Results = append([]Result(nil), rep.Results...)
 	baseline.Results[1].Passed = true
 	md := rep.Markdown(&baseline)
-	for _, want := range []string{"1/3", "⚠️ 回归", "| ok | ✅ | 3 | 2(1) | 1 | 0 | 0 |"} {
+	for _, want := range []string{"1/3", "⚠️ 回归", "| ok | ✅ | 95.3 | 3 | 2(1) | 1 | 0 | 0 |"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("报告缺少 %q:\n%s", want, md)
 		}
@@ -115,11 +115,35 @@ func TestApprovalPolicy(t *testing.T) {
 	r := &Runner{LLM: rmScript{}, WorkRoot: t.TempDir()}
 	cases := []TestCase{
 		{ID: "approve", Setup: "mkdir build", Prompt: "清理", Validate: "! test -d build"},
-		{ID: "reject", Setup: "mkdir build", Prompt: "清理", Validate: "test -d build", Approval: "reject"},
+		{ID: "reject", Setup: "mkdir build", Prompt: "清理", Validate: "test -d build", Approval: "reject", NoPrecheck: true},
 		{ID: "bad", Prompt: "x", Validate: "true", Approval: "maybe"},
 	}
 	rep := r.RunSuite(context.Background(), cases)
 	if !rep.Results[0].Passed || !rep.Results[1].Passed || rep.Results[0].Approvals != 1 || rep.Results[2].Passed {
 		t.Fatalf("%+v", rep.Results)
+	}
+}
+
+// 第 20 讲 Fail-to-Pass：判卷脚本在 Agent 动手前就通过的用例是无效用例，不能计为通过。
+func TestPrecheckRejectsAlreadyPassingCase(t *testing.T) {
+	r := &Runner{LLM: scripted{}, WorkRoot: t.TempDir(), Parallelism: 1}
+	rep := r.RunSuite(context.Background(), []TestCase{{ID: "trivial", Setup: "echo 42 > answer.txt", Prompt: "写 42", Validate: `[ "$(cat answer.txt)" = 42 ]`}})
+	if rep.Passed != 0 || !strings.Contains(rep.Results[0].Error, "Fail-to-Pass") {
+		t.Fatalf("动手前就通过的用例应判为无效: %+v", rep.Results[0])
+	}
+}
+
+// 第 20 讲第 4 步：综合得分结合成本、耗时、轮数；失败 0 分，越省分越高。
+func TestScore(t *testing.T) {
+	if Score(Result{Passed: false, Turns: 1}) != 0 {
+		t.Fatal("失败用例应为 0 分")
+	}
+	fast := Score(Result{Passed: true, Turns: 1, CostCNY: 0.001, DurationMs: 1000})
+	slow := Score(Result{Passed: true, Turns: 30, CostCNY: 0.5, DurationMs: 600000})
+	if !(fast > 90 && fast <= 100 && slow > 60 && slow < fast) {
+		t.Fatalf("得分不合理: fast=%.1f slow=%.1f", fast, slow)
+	}
+	if got := Score(Result{Passed: true, Turns: 10, CostCNY: 0.05, DurationMs: 120000}); got != 80 {
+		t.Fatalf("三项都等于参考值时应为 60+10+5+5=80, got %.1f", got)
 	}
 }

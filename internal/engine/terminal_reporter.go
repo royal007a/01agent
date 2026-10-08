@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/weberzhao/go-tiny-claw/internal/permission"
 	"github.com/weberzhao/go-tiny-claw/internal/textutil"
@@ -19,8 +21,25 @@ type TerminalReporter struct {
 	In io.Reader
 	// AutoApprove 为 true 时跳过人工审批（沙箱内 YOLO 场景）
 	AutoApprove bool
-	// ShowThinking 为 true 时把慢思考内容也打印出来（通过 OnThinkingContent）
+	// ShowThinking 为 true 时把慢思考内容也打印出来（通过 OnThinkingContent，阶段作业要求展示 Thinking 输出）
 	ShowThinking bool
+	// ApprovalTimeout 终端审批的等待上限（默认 10 分钟，与 HTTP/飞书一致）；超时视为拒绝
+	ApprovalTimeout time.Duration
+
+	approveMu sync.Mutex // 并行子 Agent 可能同时请求审批：串行提问，避免抢同一行输入
+	readOnce  sync.Once
+	lines     chan string
+}
+
+// DefaultTerminalApprovalTimeout 终端审批默认等待上限。
+const DefaultTerminalApprovalTimeout = 10 * time.Minute
+
+// OnThinkingContent 打印 Phase 1 的慢思考内容（ShowThinking 关闭时静默）。
+func (r *TerminalReporter) OnThinkingContent(ctx context.Context, content string) {
+	if !r.ShowThinking || content == "" {
+		return
+	}
+	fmt.Fprintf(r.Out, "\n[🧠 Thinking]\n%s\n", content)
 }
 
 func NewTerminalReporter() *TerminalReporter { return &TerminalReporter{Out: os.Stdout} }
@@ -65,13 +84,73 @@ func (r *TerminalReporter) RequestApproval(ctx context.Context, req permission.A
 		}
 		in = os.Stdin
 	}
-	fmt.Fprintf(r.Out, "\n\033[31m[需要审批]\033[0m 工具 %s 命中高危规则 %s\n  参数: %s\n是否放行? [y/N]: ",
-		req.ToolName, req.Rule, textutil.Truncate(req.Args, 300, "..."))
-	line, _ := bufio.NewReader(in).ReadString('\n')
-	if a := strings.ToLower(strings.TrimSpace(line)); a == "y" || a == "yes" {
-		return true, ""
+	r.approveMu.Lock()
+	defer r.approveMu.Unlock()
+	r.ensureReader(in)
+	for drained := false; !drained; { // 丢弃上一次审批超时后才到达的陈旧输入
+		select {
+		case _, ok := <-r.lines:
+			if !ok {
+				return false, "终端输入已关闭，高危操作已拒绝。"
+			}
+		default:
+			drained = true
+		}
 	}
-	return false, "人类操作员在终端拒绝了该操作。"
+	timeout := r.ApprovalTimeout
+	if timeout <= 0 {
+		timeout = DefaultTerminalApprovalTimeout
+	}
+	fmt.Fprintf(r.Out, "\n\033[31m[需要审批]\033[0m 工具 %s 命中高危规则 %s\n  参数: %s\n是否放行? [y/N]（%s 内未答复视为拒绝）: ",
+		req.ToolName, req.Rule, textutil.Truncate(req.Args, 300, "..."), timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case line, ok := <-r.lines:
+		if !ok {
+			return false, "终端输入已关闭，高危操作已拒绝。"
+		}
+		if a := strings.ToLower(strings.TrimSpace(line)); a == "y" || a == "yes" {
+			return true, ""
+		}
+		return false, "人类操作员在终端拒绝了该操作。"
+	case <-timer.C:
+		fmt.Fprintln(r.Out, "\n[审批超时] 已自动拒绝。")
+		return false, "终端审批超时未答复，高危操作已自动拒绝。"
+	case <-ctx.Done():
+		return false, "任务已取消，审批作废：" + ctx.Err().Error()
+	}
+}
+
+// ensureReader 启动唯一的 stdin 读取协程：审批与交互式对话（claw -i）共用同一行输入源，互不抢读。
+func (r *TerminalReporter) ensureReader(in io.Reader) {
+	r.readOnce.Do(func() {
+		r.lines = make(chan string, 8)
+		go func() {
+			br := bufio.NewReader(in)
+			for {
+				line, err := br.ReadString('\n')
+				if line != "" {
+					r.lines <- line
+				}
+				if err != nil {
+					close(r.lines)
+					return
+				}
+			}
+		}()
+	})
+}
+
+// ReadLine 读取下一行用户输入（第 21 讲作者答疑：多轮交互模式）；输入结束返回 ok=false。
+func (r *TerminalReporter) ReadLine() (string, bool) {
+	in := r.In
+	if in == nil {
+		in = os.Stdin
+	}
+	r.ensureReader(in)
+	line, ok := <-r.lines
+	return strings.TrimRight(line, "\r\n"), ok
 }
 
 var _ permission.Approver = (*TerminalReporter)(nil)

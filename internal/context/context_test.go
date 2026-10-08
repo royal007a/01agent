@@ -1,6 +1,8 @@
 package context
 
 import (
+	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,5 +220,101 @@ func TestEnvSection(t *testing.T) {
 	c := NewPromptComposer(wd, false).Build().Content
 	if !strings.Contains(c, "# 运行环境") || !strings.Contains(c, wd) || !strings.Contains(c, "nginx.conf") || !strings.Contains(c, "logs/") || strings.Contains(c, ".claw/") {
 		t.Fatalf("运行环境段落错误:\n%s", c)
+	}
+}
+
+// Registry 的统一参数校验（"参数校验失败"）同样要拿到自愈提示，否则 P0 引入的校验层会让类型错误失去救援指南。
+func TestRecoveryCoversRegistrySchemaValidation(t *testing.T) {
+	rm := NewRecoveryManager()
+	for _, raw := range []string{`参数校验失败: 缺少必填参数 "path"`, `参数校验失败: 参数 "limit" 必须是 number`} {
+		if got := rm.AnalyzeAndInject("read_file", raw); !strings.Contains(got, "系统救援指南") {
+			t.Errorf("schema 校验错误缺少救援提示: %q", got)
+		}
+	}
+}
+
+// 第 18/21 讲：-session 续聊时财务报表要包含重启前的累计消耗，而不是从 0 开始。
+func TestSessionUsageSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	s := NewSessionManager(dir).GetOrCreate("bill", t.TempDir())
+	s.RecordUsage(100, 50, 0.25)
+	s.RecordUsage(10, 5, 0.05)
+	r := NewSessionManager(dir).GetOrCreate("bill", t.TempDir())
+	p, c, cost := r.UsageSnapshot()
+	if p != 110 || c != 55 || math.Abs(cost-0.30) > 1e-9 || !r.UsageAvailable() {
+		t.Fatalf("重启后账单丢失: p=%d c=%d cost=%f known=%v", p, c, cost, r.UsageAvailable())
+	}
+}
+
+// 第 10 讲思考题：技能多了以后，System Prompt 只放名称+触发条件，正文由 read_skill 按需加载。
+func TestSkillsLazyLoadWhenLarge(t *testing.T) {
+	wd := t.TempDir()
+	write := func(name, body string) {
+		p := filepath.Join(wd, ".claw", "skills", name, "SKILL.md")
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte("---\nname: "+name+"\ndescription: 当需要 "+name+" 时\n---\n"+body), 0o644)
+	}
+	write("small", "小技能正文")
+	l := NewSkillLoader(wd)
+	if got := l.Render(); !strings.Contains(got, "小技能正文") {
+		t.Fatalf("技能总量小时保持第 10 讲的渴望式加载: %q", got)
+	}
+	write("huge", strings.Repeat("超长运维手册。", 2000))
+	got := l.Render()
+	if strings.Contains(got, "超长运维手册") || strings.Contains(got, "小技能正文") {
+		t.Fatal("技能总量超过阈值后正文不应进入 System Prompt")
+	}
+	if !strings.Contains(got, "huge") || !strings.Contains(got, "当需要 huge 时") || !strings.Contains(got, "read_skill") {
+		t.Fatalf("懒加载模式应列出名称、触发条件并提示用 read_skill: %q", got)
+	}
+	if body, ok := l.Body("huge"); !ok || !strings.Contains(body, "超长运维手册") {
+		t.Fatal("Body 应能按名称取回技能正文")
+	}
+	if _, ok := l.Body("../etc"); ok {
+		t.Fatal("未知技能名不应返回内容")
+	}
+}
+
+// 第 11 讲思考题：Working Memory 除了条数上限，还要有字符上限（超长单条消息不能撑爆请求）。
+func TestWorkingMemoryCharBudget(t *testing.T) {
+	s := NewSession("wm", t.TempDir())
+	s.Append(schema.Message{Role: schema.RoleUser, Content: strings.Repeat("旧", 5000)})
+	s.Append(schema.Message{Role: schema.RoleAssistant, Content: "好的"})
+	s.Append(schema.Message{Role: schema.RoleUser, Content: "最新问题"})
+	got := s.GetWorkingMemoryBudget(50, 1000)
+	if len(got) != 2 || got[len(got)-1].Content != "最新问题" {
+		t.Fatalf("超出字符预算的旧消息应被丢弃、最新消息保留: %d 条", len(got))
+	}
+	// 即使最新一条本身超长，也至少保留它（交给 Compactor 掐头去尾）
+	s.Append(schema.Message{Role: schema.RoleUser, Content: strings.Repeat("新", 5000)})
+	if got := s.GetWorkingMemoryBudget(50, 1000); len(got) != 1 {
+		t.Fatalf("最新消息必须保留: %d 条", len(got))
+	}
+}
+
+// 第 12 讲作者答疑：远期历史里超长的 ToolCall 参数（如 write_file 的 content）也要掩码，
+// 但保留 path 等短字段与合法 JSON；保护区内与原始 Session 历史都不能被改动。
+func TestCompactorMasksLongToolArgsOutsideWorkingMemory(t *testing.T) {
+	big := strings.Repeat("x", 3000)
+	args := []byte(`{"path":"main.go","content":"` + big + `"}`)
+	msgs := []schema.Message{
+		{Role: schema.RoleSystem, Content: "sys"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "1", Name: "write_file", Arguments: args}}},
+		{Role: schema.RoleUser, ToolCallID: "1", Content: "ok"},
+		{Role: schema.RoleUser, Content: strings.Repeat("填充", 6000)},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "2", Name: "write_file", Arguments: args}}},
+		{Role: schema.RoleUser, ToolCallID: "2", Content: "ok"},
+	}
+	c := NewCompactor(1000, 2)
+	out := c.Compact(msgs)
+	old := string(out[1].ToolCalls[0].Arguments)
+	if strings.Contains(old, big) || !strings.Contains(old, `"path":"main.go"`) || !json.Valid(out[1].ToolCalls[0].Arguments) {
+		t.Fatalf("远期 write_file 参数应掩码 content、保留 path 且是合法 JSON: %.200s", old)
+	}
+	if !strings.Contains(string(out[4].ToolCalls[0].Arguments), big) {
+		t.Fatal("保护区内的 ToolCall 参数不应被掩码")
+	}
+	if !strings.Contains(string(msgs[1].ToolCalls[0].Arguments), big) {
+		t.Fatal("压缩只作用于请求视图，不能改写原始历史")
 	}
 }

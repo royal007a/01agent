@@ -67,7 +67,12 @@ func serve(args []string) {
 	if appID, appSecret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET"); appID != "" && appSecret != "" {
 		bot = feishu.NewFeishuBot(feishu.NewLarkSender(appID, appSecret),
 			func(ctx context.Context, chatID, prompt string, r engine.Reporter) error {
-				return a.eng.Chat(ctx, sessions.GetOrCreate("feishu_"+chatID, a.workDir), prompt, r)
+				sess := sessions.GetOrCreate("feishu_"+chatID, a.workDir)
+				p0, c0, cost0 := sess.UsageSnapshot()
+				err := a.eng.Chat(ctx, sess, prompt, r)
+				p1, c1, cost1 := sess.UsageSnapshot()
+				r.OnMessage(ctx, feishu.CostSummary(p1-p0, c1-c0, cost1-cost0, sess.UsageAvailable())) // 第 22 讲：汇报附上本次成本
+				return err
 			})
 		// 第 22 讲思考题：群聊只响应 @ 机器人的消息（可用 FEISHU_BOT_OPEN_ID 精确到本机器人）
 		bot.BotOpenID = os.Getenv("FEISHU_BOT_OPEN_ID")

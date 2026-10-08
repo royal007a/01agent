@@ -27,7 +27,11 @@ func NewSubagentTool(runner AgentRunner, readOnlyRegistry Registry) *SubagentToo
 	return &SubagentTool{runner: runner, registry: readOnlyRegistry}
 }
 
-func (t *SubagentTool) Name() string { return "spawn_subagent" }
+// SubagentToolName 子智能体委派工具名。它只做编排（等待子循环），引擎的全局并发信号量不为它占位，
+// 否则 5 个并行子 Agent 占满槽位后，它们自己的叶子工具永远拿不到槽位而死锁。
+const SubagentToolName = "spawn_subagent"
+
+func (t *SubagentTool) Name() string { return SubagentToolName }
 
 // ReadOnly 子智能体只拿到只读工具，因此多个 spawn_subagent 可以被引擎并发执行
 // （第 17 讲思考题："多路侦察兵并行出发"）。

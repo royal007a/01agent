@@ -85,6 +85,33 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 	return res
 }
 
+// GetWorkingMemoryBudget 在条数上限之外再加字符上限（第 11 讲思考题）：从最新消息往前累加，
+// 超出 maxChars 的更早消息被丢弃；最新一条无论多长都保留（超长内容交给 Compactor 掐头去尾）。
+// maxChars<=0 时等同 GetWorkingMemory。
+func (s *Session) GetWorkingMemoryBudget(limit, maxChars int) []schema.Message {
+	res := s.GetWorkingMemory(limit)
+	if maxChars <= 0 || len(res) == 0 {
+		return res
+	}
+	used, start := 0, len(res)
+	for i := len(res) - 1; i >= 0; i-- {
+		n := len(res[i].Content)
+		for _, tc := range res[i].ToolCalls {
+			n += len(tc.Arguments)
+		}
+		if used+n > maxChars && i < len(res)-1 {
+			break
+		}
+		used += n
+		start = i
+	}
+	res = res[start:]
+	for len(res) > 1 && res[0].IsToolResult() { // 同样不能以孤儿工具结果开头
+		res = res[1:]
+	}
+	return res
+}
+
 // RecordUsage 累加账单（由 CostTracker 调用）。
 func (s *Session) RecordUsage(prompt, completion int, cost float64) {
 	s.mu.Lock()
@@ -92,6 +119,44 @@ func (s *Session) RecordUsage(prompt, completion int, cost float64) {
 	s.TotalPromptTokens += prompt
 	s.TotalCompletionTokens += completion
 	s.TotalCost += cost
+	s.UsageKnown = true
+	if s.logPath != "" {
+		s.saveUsageLocked()
+	}
+}
+
+// usageFile 持久化会话累计账单（第 18/21 讲：-session 续聊时财务报表不能从 0 开始）。
+// 单独存一份而不是从历史消息里汇总：Thinking 阶段与子 Agent 的消耗不会进入会话历史。
+type usageFile struct {
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	CostCNY          float64 `json:"cost_cny"`
+}
+
+func (s *Session) saveUsageLocked() {
+	b, err := json.Marshal(usageFile{s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalCost})
+	if err != nil {
+		return
+	}
+	tmp := s.logPath + ".usage.tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+		if err := os.Rename(tmp, s.logPath+".usage.json"); err != nil {
+			log.Printf("[Session] 保存会话 %s 账单失败: %v", s.ID, err)
+		}
+	}
+}
+
+func (s *Session) loadUsage() {
+	b, err := os.ReadFile(s.logPath + ".usage.json")
+	if err != nil {
+		return
+	}
+	var u usageFile
+	if json.Unmarshal(b, &u) != nil {
+		log.Printf("[Session] 会话 %s 的账单文件损坏，忽略", s.ID)
+		return
+	}
+	s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalCost = u.PromptTokens, u.CompletionTokens, u.CostCNY
 	s.UsageKnown = true
 }
 
@@ -160,6 +225,7 @@ func (sm *SessionManager) GetOrCreate(id, workDir string) *Session {
 				}
 				log.Printf("[Session] ⚠️ 会话 %s 的历史文件损坏（%v），已保留前 %d 条合法消息，原文件备份为 %s", id, err, len(msgs), backup)
 			}
+			sess.loadUsage()
 			if len(msgs) > 0 {
 				sess.history = msgs
 				log.Printf("[Session] 从磁盘恢复会话 %s：%d 条消息", id, len(msgs))

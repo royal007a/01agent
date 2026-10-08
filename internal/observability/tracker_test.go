@@ -77,3 +77,26 @@ func TestTimedRegistry(t *testing.T) {
 		t.Fatal("装饰器应透传其余方法")
 	}
 }
+
+type quickTool struct{}
+
+func (quickTool) Name() string { return "quick" }
+func (quickTool) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{Name: "quick"}
+}
+func (quickTool) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+
+// 第 18 讲思考题：只统计工具在本地"物理执行"的耗时，人工审批/写锁等待不能算进去。
+func TestTimedRegistryExcludesApprovalWait(t *testing.T) {
+	r := tools.NewRegistry()
+	r.Register(quickTool{})
+	r.Use(func(context.Context, schema.ToolCall) (bool, string) {
+		time.Sleep(120 * time.Millisecond) // 模拟等待人工审批
+		return true, ""
+	})
+	st := &Stats{}
+	NewTimedRegistry(r, st).Execute(context.Background(), schema.ToolCall{Name: "quick", Arguments: []byte(`{}`)})
+	if got := st.Snapshot().ToolLatency; got >= 100*time.Millisecond {
+		t.Fatalf("审批等待被计入了工具执行耗时: %v", got)
+	}
+}

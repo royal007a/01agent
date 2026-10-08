@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/schema"
 	"github.com/weberzhao/go-tiny-claw/internal/tools"
 	"github.com/weberzhao/go-tiny-claw/internal/trace"
@@ -293,6 +295,9 @@ func TestTraceTree(t *testing.T) {
 	if root == nil || root.Name != "Agent.Run" || root.Get("turns") != 2 {
 		t.Fatalf("根 Span 异常: %+v", root)
 	}
+	if root.Count("Context.Compact") != 2 { // 第 19 讲：每轮的上下文压缩都有独立 Span
+		t.Fatalf("每轮应有一个 Context.Compact Span, got %d", root.Count("Context.Compact"))
+	}
 	if root.Count("Turn-1") != 1 || root.Count("Subagent.Run") != 2 || root.Count("LLM.Action") != 2+4 {
 		t.Fatalf("树结构: turns=%d sub=%d llm=%d", root.Count("Turn-1"), root.Count("Subagent.Run"), root.Count("LLM.Action"))
 	}
@@ -363,4 +368,253 @@ type stubbornTalker struct{ n int }
 func (s *stubbornTalker) Generate(context.Context, []schema.Message, []schema.ToolDefinition) (*schema.Message, error) {
 	s.n++
 	return &schema.Message{Role: schema.RoleAssistant, Content: "让我先看看。"}, nil
+}
+
+// todoProvider：第一次直接宣布完成；看到 TODO 未完成提醒后把 TODO.md 勾完再结束。
+type todoProvider struct {
+	wd    string
+	calls int
+}
+
+func (p *todoProvider) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	p.calls++
+	last := msgs[len(msgs)-1]
+	if strings.Contains(last.Content, "TODO.md 中仍有") {
+		_ = os.WriteFile(filepath.Join(p.wd, "TODO.md"), []byte("- [x] 写代码\n- [x] 写测试\n"), 0o644)
+		return &schema.Message{Role: schema.RoleAssistant, Content: "都做完了。"}, nil
+	}
+	return &schema.Message{Role: schema.RoleAssistant, Content: "任务完成。"}, nil
+}
+
+// 第 02 讲作者答疑"完成度校验"：Plan Mode 下 TODO.md 还有 - [ ] 时模型想退出，Harness 拦截并提醒。
+func TestPlanModeBlocksExitWithUncheckedTodos(t *testing.T) {
+	wd := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [x] 写代码\n- [ ] 写测试\n"), 0o644)
+	p := &todoProvider{wd: wd}
+	if err := NewAgentEngine(p, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("t", wd), "做完它", nil); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls != 2 {
+		t.Fatalf("未完成的 TODO 应拦截一次退出，模型调用次数=%d", p.calls)
+	}
+	// 永远不勾 TODO 的模型：有限次提醒后正常结束，不死循环
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [ ] 永远做不完\n"), 0o644)
+	stub := &stubbornTalker{}
+	if err := NewAgentEngine(stub, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("t2", wd), "做", nil); err != nil {
+		t.Fatal(err)
+	}
+	if stub.n > 1+2+2 { // 首轮 + 最多 2 次防早退 + 最多 2 次 TODO 提醒
+		t.Fatalf("TODO 提醒必须有上限, calls=%d", stub.n)
+	}
+	// 非 Plan Mode 不读 TODO.md
+	p2 := &todoProvider{wd: wd}
+	_ = NewAgentEngine(p2, &fakeRegistry{}, false, false).Chat(context.Background(), ctxpkg.NewSession("t3", wd), "做", nil)
+	if p2.calls != 1 {
+		t.Fatalf("非 Plan Mode 不应做 TODO 完成度校验, calls=%d", p2.calls)
+	}
+}
+
+// gateProvider：记录并发进入 Generate 的数量，第一次调用阻塞直到 release 关闭。
+type gateProvider struct {
+	mu      sync.Mutex
+	active  int
+	max     int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *gateProvider) Generate(ctx context.Context, _ []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	g.mu.Lock()
+	g.active++
+	if g.active > g.max {
+		g.max = g.active
+	}
+	g.mu.Unlock()
+	defer func() { g.mu.Lock(); g.active--; g.mu.Unlock() }()
+	g.started <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &schema.Message{Role: schema.RoleAssistant, Content: "完成。"}, nil
+}
+
+// 第 09 讲思考题：同一工作区同一时间只允许一个 Agent 任务执行（跨会话），等待可被取消。
+func TestWorkspaceLockSerializesRunsAcrossSessions(t *testing.T) {
+	wd := t.TempDir()
+	g := &gateProvider{started: make(chan struct{}, 4), release: make(chan struct{})}
+	e := NewAgentEngine(g, &fakeRegistry{}, false, false)
+	e.WorkspaceLocks = keylock.New()
+	done := make(chan error, 2)
+	go func() { done <- e.Chat(context.Background(), ctxpkg.NewSession("a", wd), "任务A", nil) }()
+	<-g.started
+	go func() { done <- e.Chat(context.Background(), ctxpkg.NewSession("b", wd), "任务B", nil) }()
+	select {
+	case <-g.started:
+		t.Fatal("同一工作区的第二个任务不应在第一个结束前开始")
+	case <-time.After(50 * time.Millisecond):
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := e.Chat(ctx, ctxpkg.NewSession("c", wd), "任务C", nil); err == nil {
+		t.Fatal("等待工作区锁时 ctx 超时应返回错误")
+	}
+	close(g.release)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.max != 1 {
+		t.Fatalf("同一工作区的任务发生了并发, max=%d", g.max)
+	}
+}
+
+// nestRegistry：所有工具只读；spawn_subagent 在执行中再并发派发 5 个叶子工具（模拟子 Agent 的并行批次）。
+type nestRegistry struct {
+	e           *AgentEngine
+	arrived     *sync.WaitGroup // 所有 spawn 都已开始执行（若它们占槽位，此刻槽位已被占满）后才派发叶子，使死锁可确定复现
+	mu          sync.Mutex
+	active, max int
+}
+
+func (n *nestRegistry) Register(tools.BaseTool)  {}
+func (n *nestRegistry) Use(tools.MiddlewareFunc) {}
+func (n *nestRegistry) IsReadOnly(string) bool   { return true }
+func (n *nestRegistry) GetAvailableTools() []schema.ToolDefinition {
+	return []schema.ToolDefinition{{Name: "leaf"}, {Name: tools.SubagentToolName}}
+}
+func (n *nestRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	if call.Name == tools.SubagentToolName {
+		if n.arrived != nil {
+			n.arrived.Done()
+			n.arrived.Wait()
+		}
+		leaves := make([]schema.ToolCall, 5)
+		for i := range leaves {
+			leaves[i] = schema.ToolCall{ID: fmt.Sprint(i), Name: "leaf"}
+		}
+		n.e.executeToolsWith(ctx, n, leaves, NopReporter{})
+		return schema.ToolResult{ToolCallID: call.ID, Output: "sub done"}
+	}
+	n.mu.Lock()
+	n.active++
+	if n.active > n.max {
+		n.max = n.active
+	}
+	n.mu.Unlock()
+	time.Sleep(10 * time.Millisecond)
+	n.mu.Lock()
+	n.active--
+	n.mu.Unlock()
+	return schema.ToolResult{ToolCallID: call.ID, Output: "ok"}
+}
+
+// 第 08 讲思考题：并发上限是全局的——5 个并行子 Agent 各自再并发 5 个工具，叶子工具总并发仍 ≤ MaxParallelTools，且不死锁。
+func TestGlobalToolConcurrencyCapWithNestedSubagents(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &fakeRegistry{}, false, false)
+	var arrived sync.WaitGroup
+	arrived.Add(5)
+	n := &nestRegistry{e: e, arrived: &arrived}
+	calls := make([]schema.ToolCall, 5)
+	for i := range calls {
+		calls[i] = schema.ToolCall{ID: fmt.Sprint("s", i), Name: tools.SubagentToolName}
+	}
+	done := make(chan struct{})
+	go func() { e.executeToolsWith(context.Background(), n, calls, NopReporter{}); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("嵌套子 Agent 的并发执行发生死锁")
+	}
+	if n.max > MaxParallelTools {
+		t.Fatalf("叶子工具总并发 %d 超过全局上限 %d", n.max, MaxParallelTools)
+	}
+}
+
+// 第 12 讲思考题：压缩阈值依据真实 PromptTokens 自适应，而不是写死字符数。
+func TestCompactionThresholdAdaptsToRealUsage(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &fakeRegistry{}, false, false)
+	if got := e.compactorFor("s", nil).MaxChars; got != 20000 {
+		t.Fatalf("未配置上下文窗口时沿用固定阈值, got %d", got)
+	}
+	e.ContextWindowTokens = 100000
+	if got := e.compactorFor("s", nil).MaxChars; got != 20000 {
+		t.Fatalf("还没有真实 Usage 时沿用固定阈值, got %d", got)
+	}
+	req := []schema.Message{{Role: schema.RoleUser, Content: strings.Repeat("a", 30000)}}
+	e.observeTokenRatio("s", req, &schema.Message{Usage: &schema.Usage{PromptTokens: 10000}}) // 3 字符/token
+	if got := e.compactorFor("s", nil).MaxChars; got != 180000 {
+		t.Fatalf("阈值应为 100000×0.6×3=180000, got %d", got)
+	}
+	if got := e.compactorFor("other", nil).MaxChars; got != 20000 {
+		t.Fatalf("比例按会话隔离, got %d", got)
+	}
+}
+
+// 第 13 讲作者答疑：上一个任务的 TODO.md 已全部勾选时，新任务开始前 Harness 自动归档 PLAN/TODO，
+// 否则"已有文件绝不覆盖"的规则会让 Plan Mode 无法开启新任务。
+func TestPlanModeArchivesCompletedPlan(t *testing.T) {
+	wd := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd, "PLAN.md"), []byte("旧计划"), 0o644)
+	_ = os.WriteFile(filepath.Join(wd, "TODO.md"), []byte("- [x] a\n- [x] b\n"), 0o644)
+	if err := NewAgentEngine(&todoProvider{wd: wd}, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("ar", wd), "新任务", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, "TODO.md")); !os.IsNotExist(err) {
+		t.Fatal("已完成的 TODO.md 应被移出工作区根目录")
+	}
+	archived, _ := filepath.Glob(filepath.Join(wd, ".claw", "archive", "*", "PLAN.md"))
+	if len(archived) != 1 {
+		t.Fatalf("PLAN.md 应归档到 .claw/archive/<时间>_task/: %v", archived)
+	}
+	// 未完成的计划不归档
+	wd2 := t.TempDir()
+	_ = os.WriteFile(filepath.Join(wd2, "TODO.md"), []byte("- [x] a\n- [ ] b\n"), 0o644)
+	_ = NewAgentEngine(&stubbornTalker{}, &fakeRegistry{}, false, true).Chat(context.Background(), ctxpkg.NewSession("ar2", wd2), "继续", nil)
+	if _, err := os.Stat(filepath.Join(wd2, "TODO.md")); err != nil {
+		t.Fatal("未完成的 TODO.md 不能被归档")
+	}
+}
+
+// pathRegistry：write/edit 视为写操作，其余只读；记录调用。
+type pathRegistry struct{ fakeRegistry }
+
+func (p *pathRegistry) IsReadOnly(name string) bool {
+	return name != "edit_file" && name != "write_file"
+}
+
+// 第 13 讲作者答疑：模型更新 TODO.md 后，在工具结果里追加"先总结进展"的提醒。
+func TestTodoUpdateAppendsProgressNudge(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &pathRegistry{}, false, true)
+	obs := e.executeTools(context.Background(), []schema.ToolCall{
+		{ID: "1", Name: "edit_file", Arguments: []byte(`{"path":"TODO.md","old_text":"- [ ] a","new_text":"- [x] a"}`)},
+		{ID: "2", Name: "edit_file", Arguments: []byte(`{"path":"main.go","old_text":"a","new_text":"b"}`)},
+	}, NopReporter{})
+	if !strings.Contains(obs[0].Content, "总结") || strings.Contains(obs[1].Content, "总结") {
+		t.Fatalf("只有 TODO.md 的成功更新才追加进展提醒: %q / %q", obs[0].Content, obs[1].Content)
+	}
+}
+
+// 第 15 讲作者答疑：连续大量只读调用却没有任何写动作（"探索螺旋"），注入提醒。
+func TestExplorationSpiralReminder(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &pathRegistry{}, false, false)
+	var hits int
+	for i := 0; i < ExplorationSpiralThreshold; i++ {
+		calls := []schema.ToolCall{{ID: fmt.Sprint(i), Name: "read_file", Arguments: []byte(fmt.Sprintf(`{"path":"f%d.go"}`, i))}}
+		if m := e.checkExplorationSpiral("s", calls); m != nil {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("达到阈值时应恰好提醒一次, hits=%d", hits)
+	}
+	// 出现写动作后重新计数
+	e.checkExplorationSpiral("s", []schema.ToolCall{{Name: "edit_file"}})
+	for i := 0; i < ExplorationSpiralThreshold-1; i++ {
+		if m := e.checkExplorationSpiral("s", []schema.ToolCall{{Name: "read_file"}}); m != nil {
+			t.Fatal("写动作后计数应清零")
+		}
+	}
 }

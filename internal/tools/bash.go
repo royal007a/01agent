@@ -30,6 +30,11 @@ func NewBashTool(workDir string) *BashTool {
 
 func (t *BashTool) Name() string { return "bash" }
 
+// Meta 声明 bash 自带头尾截断（clampOutput），Registry 的统一上限要留出提示语和退出码说明的余量，避免截第二刀。
+func (t *BashTool) Meta() ToolMeta {
+	return ToolMeta{SideEffect: "local", MaxOutputBytes: BashMaxBytes + selfLimitSlack}
+}
+
 func (t *BashTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
@@ -104,8 +109,10 @@ func clampOutput(s string) string {
 	if len(s) <= BashMaxBytes {
 		return s
 	}
-	half := BashMaxBytes / 2
-	return fmt.Sprintf("%s\n\n...[终端输出过长（共 %d 字节），中间部分已截断]...\n\n%s", textutil.Head(s, half), len(s), textutil.Tail(s, half))
+	// 截断说明本身也计入上限：总长度不超过 BashMaxBytes，尾部（汇总行、报错）与头部各留一半
+	marker := fmt.Sprintf("\n\n...[终端输出过长（共 %d 字节），中间部分已截断]...\n\n", len(s))
+	half := (BashMaxBytes - len(marker)) / 2
+	return textutil.Head(s, half) + marker + textutil.Tail(s, half)
 }
 
 var secretEnv = regexp.MustCompile(`(?i)^(CLAW_|FEISHU_|ZHIPU_|VOLCES_|ARK_|ANTHROPIC_|OPENAI_)|(KEY|TOKEN|SECRET|PASSWORD)[^=]*=`)

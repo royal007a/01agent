@@ -104,6 +104,13 @@ func (r *registryImpl) IsReadOnly(name string) bool {
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	var execDur time.Duration
+	res := r.execute(ctx, call, &execDur)
+	res.Timed, res.ExecDuration = true, execDur // 只计物理执行时间：审批、写锁等待不计入（第 18 讲）
+	return res
+}
+
+func (r *registryImpl) execute(ctx context.Context, call schema.ToolCall, execDurOut *time.Duration) schema.ToolResult {
 	// 1. 路由查找：找不到说明模型产生了幻觉，直接向模型抛出错误让它纠正
 	r.mu.RLock()
 	tool, exists := r.tools[call.Name]
@@ -148,7 +155,9 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		defer r.writeLock.Release()
 	}
 	// 3. 执行工具逻辑：将原始 JSON 字节流直接丢给具体工具
+	execStart := time.Now()
 	output, err := tool.Execute(toolCtx, call.Arguments)
+	*execDurOut = time.Since(execStart)
 	// 4. 封装结果
 	if err != nil {
 		return schema.ToolResult{

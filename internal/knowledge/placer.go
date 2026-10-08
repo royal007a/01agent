@@ -21,6 +21,9 @@ type Layout struct {
 	PreferencesFile string `json:"preferences_file"` // 用户偏好（倾向）
 	DiscoveriesFile string `json:"discoveries_file"` // 执行中核对出的事实
 	IndexFile       string `json:"index_file"`       // 结构化索引（事实来源，markdown 由它渲染）
+	// Disabled 为 true 时该工作区不启用动态知识更新：例如第 22 讲 AgentOps 工作区规定
+	// "修改任何文件都要人工审批"，而知识归位会在 Run 结束后直接写工作区文件，绕开审批。
+	Disabled bool `json:"disabled"`
 }
 
 // LoadLayout 读取布局：默认值 + 可选的 .claw/knowledge.json；工作区已有 docs/adr 时优先沿用。
@@ -38,6 +41,7 @@ func LoadLayout(workDir string) Layout {
 	if b, err := os.ReadFile(filepath.Join(workDir, ".claw", "knowledge.json")); err == nil {
 		var o Layout
 		if json.Unmarshal(b, &o) == nil {
+			l.Disabled = o.Disabled
 			for _, p := range []struct {
 				dst *string
 				v   string

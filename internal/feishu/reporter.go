@@ -56,3 +56,12 @@ func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 
 // 编译时类型检查
 var _ engine.Reporter = (*FeishuReporter)(nil)
+
+// CostSummary 第 22 讲：任务结束时在飞书里附上本次运行的消耗（按 Run 前后的会话账单差值计算）。
+// usageKnown=false（本地模型不回报 Usage）时如实说明，而不是显示 0。
+func CostSummary(prompt, completion int, costCNY float64, usageKnown bool) string {
+	if !usageKnown {
+		return "📊 本次运行：模型未回报 Token 用量，无法计算成本。"
+	}
+	return fmt.Sprintf("📊 本次运行消耗：输入 %d tokens，输出 %d tokens，费用 ¥%.4f", prompt, completion, costCNY)
+}

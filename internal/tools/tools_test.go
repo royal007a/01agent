@@ -439,3 +439,66 @@ func TestWriteLockIsAcquiredAfterMiddleware(t *testing.T) {
 	}
 	close(blockApproval)
 }
+
+// 自带截断的工具（bash 头尾、read_file 前 8000 字节）不能再被 Registry 截第二刀：
+// 否则 bash 的"共 N 字节"提示被吞，read_file 声称"截断至前 8000 字节"却丢了中间内容。
+func TestRegistryDoesNotDoubleTruncateSelfLimitedTools(t *testing.T) {
+	wd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wd, "big.txt"), []byte(strings.Repeat("0123456789", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	r.Register(NewBashTool(wd))
+	r.Register(NewReadFileTool(wd))
+	bash := r.Execute(context.Background(), schema.ToolCall{ID: "b", Name: "bash", Arguments: []byte(`{"command":"head -c 20000 /dev/zero | tr '\\0' a; echo; echo END"}`)})
+	if !strings.Contains(bash.Output, "终端输出过长（共") || strings.Contains(bash.Output, "工具输出超过") || !strings.Contains(bash.Output, "END") {
+		t.Fatalf("bash 被二次截断: ...%q", bash.Output[len(bash.Output)-200:])
+	}
+	rf := r.Execute(context.Background(), schema.ToolCall{ID: "r", Name: "read_file", Arguments: []byte(`{"path":"big.txt"}`)})
+	if strings.Contains(rf.Output, "工具输出超过") || !strings.HasPrefix(rf.Output, strings.Repeat("0123456789", ReadFileMaxBytes/10)) {
+		t.Fatalf("read_file 被二次截断（前 %d 字节应完整保留）", ReadFileMaxBytes)
+	}
+}
+
+// 第 07 讲 L4：old_text 首尾的纯空白行要像课程一样用 TrimSpace 整体剥掉，再逐行匹配。
+func TestFuzzyReplaceL4TrimsWhitespaceOnlyEdges(t *testing.T) {
+	content := "package x\n\nfunc f() {\n\tif x {\n\t\tfoo()\n\t}\n}\n"
+	got, err := fuzzyReplace(content, "  \nif x {\nfoo()\n}\n  ", "if x {\nbar()\n}")
+	if err != nil {
+		t.Fatalf("首尾为纯空白行的 old_text 应在 L4 命中: %v", err)
+	}
+	if !strings.Contains(got, "bar()") || strings.Contains(got, "foo()") {
+		t.Fatalf("替换结果不对: %q", got)
+	}
+}
+
+func TestReadSkillTool(t *testing.T) {
+	wd := t.TempDir()
+	p := filepath.Join(wd, ".claw", "skills", "ops", "SKILL.md")
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.WriteFile(p, []byte("---\nname: ops\ndescription: 排障\n---\n先看 error.log"), 0o644)
+	r := NewRegistry()
+	r.Register(NewReadSkillTool(wd))
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "read_skill", Arguments: []byte(`{"name":"ops"}`)}); got.IsError || got.Output != "先看 error.log" {
+		t.Fatalf("read_skill 应返回技能正文: %#v", got)
+	}
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "read_skill", Arguments: []byte(`{"name":"nope"}`)}); !got.IsError {
+		t.Fatal("未知技能应报错")
+	}
+	if !r.IsReadOnly("read_skill") {
+		t.Fatal("read_skill 必须是只读工具（可并发、子 Agent 可用）")
+	}
+}
+
+// 第 17 讲：子 Agent 的 bash 受 ReadOnlyGuard 约束后应视为只读，才能与其它只读工具并发执行。
+func TestAsReadOnlyMarksGuardedTool(t *testing.T) {
+	r := NewRegistry()
+	r.Register(AsReadOnly(NewBashTool(t.TempDir())))
+	r.Use(ReadOnlyGuard())
+	if !r.IsReadOnly("bash") {
+		t.Fatal("受守卫的 bash 应标记为只读")
+	}
+	if got := r.Execute(context.Background(), schema.ToolCall{Name: "bash", Arguments: []byte(`{"command":"echo x > f"}`)}); !got.IsError {
+		t.Fatal("只读标记不能绕过守卫：写操作仍必须被拦截")
+	}
+}

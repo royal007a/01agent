@@ -20,6 +20,11 @@ func NewReadFileTool(workDir string) *ReadFileTool { return &ReadFileTool{workDi
 func (t *ReadFileTool) Name() string   { return "read_file" }
 func (t *ReadFileTool) ReadOnly() bool { return true }
 
+// Meta 声明 read_file 自带前 ReadFileMaxBytes 截断，Registry 只做兜底，不再截第二刀。
+func (t *ReadFileTool) Meta() ToolMeta {
+	return ToolMeta{SideEffect: "none", MaxOutputBytes: ReadFileMaxBytes + selfLimitSlack}
+}
+
 func (t *ReadFileTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),

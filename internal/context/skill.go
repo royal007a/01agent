@@ -65,6 +65,39 @@ func (s *SkillLoader) LoadAll() string {
 	return b.String()
 }
 
+// LazySkillThreshold 所有技能正文合计超过该字节数时切换为懒加载（第 10 讲思考题）：
+// 技能少时沿用课程的渴望式加载（行为可预期），多了以后只放元数据，避免 System Prompt 膨胀。
+const LazySkillThreshold = 4000
+
+// Render 组装技能段落：总量小时渴望式加载正文，超过阈值时只列名称与触发条件，正文由 read_skill 按需读取。
+func (s *SkillLoader) Render() string {
+	skills := s.Discover()
+	total := 0
+	for _, sk := range skills {
+		total += len(sk.Body)
+	}
+	if total <= LazySkillThreshold {
+		return s.LoadAll()
+	}
+	var b strings.Builder
+	b.WriteString("\n### 可用专业技能 (Agent Skills)\n")
+	b.WriteString("以下技能的正文没有预先加载。当任务符合某个技能的触发条件时，先调用 read_skill(name) 读取其完整执行指南，再严格按指南执行：\n\n")
+	for _, sk := range skills {
+		fmt.Fprintf(&b, "- **%s**：%s\n", sk.Name, sk.Description)
+	}
+	return b.String()
+}
+
+// Body 按技能名称返回正文（只在已发现的技能中查找，不接受路径）。
+func (s *SkillLoader) Body(name string) (string, bool) {
+	for _, sk := range s.Discover() {
+		if sk.Name == name {
+			return sk.Body, true
+		}
+	}
+	return "", false
+}
+
 // parseSkillMD 极简解析带 YAML Frontmatter 的 Markdown。
 func parseSkillMD(content string) Skill {
 	skill := Skill{Name: "Unknown Skill", Description: "No description provided.", Body: strings.TrimSpace(content)}

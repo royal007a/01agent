@@ -3,9 +3,11 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/weberzhao/go-tiny-claw/internal/context"
+	"github.com/weberzhao/go-tiny-claw/internal/keylock"
 	"github.com/weberzhao/go-tiny-claw/internal/knowledge"
 	"github.com/weberzhao/go-tiny-claw/internal/provider"
 	"github.com/weberzhao/go-tiny-claw/internal/runctx"
@@ -46,9 +49,20 @@ type AgentEngine struct {
 	PlanMode bool
 	// WorkingMemoryLimit 每轮从 Session 截取的最近消息条数（第 11 讲）
 	WorkingMemoryLimit int
+	// WorkingMemoryMaxChars 工作记忆的字符硬上限（第 11 讲思考题）；最新一条消息总会保留
+	WorkingMemoryMaxChars int
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
 	MaxTurns int
+	// ContextWindowTokens 模型上下文窗口（token）。>0 时压缩阈值按真实 PromptTokens 自适应（第 12 讲思考题）
+	ContextWindowTokens int
+	tokenRatios         sync.Map // sessionID -> 每 token 对应的字符数（来自上一次请求的真实 Usage）
+	spiralMu            sync.Mutex
+	spiral              map[string]int // sessionID -> 连续只读调用次数（第 15 讲作者答疑：探索螺旋）
+	slotsOnce           sync.Once
+	slots               chan struct{}
+	// WorkspaceLocks 非空时，同一工作区的 Run 互斥（第 09 讲思考题）；app.Build 注入进程级共享表。
+	WorkspaceLocks *keylock.Table
 	// Run 级硬预算；0 表示该维度不启用。预算按本次唤醒相对 Session 基线计算。
 	MaxDuration time.Duration
 	MaxTokens   int
@@ -70,16 +84,17 @@ type AgentEngine struct {
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
-		provider:           p,
-		registry:           r,
-		EnableThinking:     enableThinking,
-		PlanMode:           planMode,
-		WorkingMemoryLimit: 20,
-		MaxTurns:           60,
-		EarlyExitNudges:    2,
-		compactor:          ctxpkg.NewCompactor(20000, 6),
-		recovery:           ctxpkg.NewRecoveryManager(),
-		injector:           NewReminderInjector(),
+		provider:              p,
+		registry:              r,
+		EnableThinking:        enableThinking,
+		PlanMode:              planMode,
+		WorkingMemoryLimit:    20,
+		WorkingMemoryMaxChars: 120000,
+		MaxTurns:              60,
+		EarlyExitNudges:       2,
+		compactor:             ctxpkg.NewCompactor(20000, 6),
+		recovery:              ctxpkg.NewRecoveryManager(),
+		injector:              NewReminderInjector(),
 	}
 }
 
@@ -96,6 +111,20 @@ func (e *AgentEngine) Chat(ctx context.Context, session *ctxpkg.Session, prompt 
 func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) (err error) {
 	if reporter == nil {
 		reporter = NopReporter{}
+	}
+	// 第 09 讲思考题：同一工作区同一时间只允许一个 Agent 任务（跨会话/跨渠道）；排队等待可被取消，
+	// 且等待时间不计入本次 Run 的预算。
+	if e.WorkspaceLocks != nil {
+		key := filepath.Clean(session.WorkDir)
+		unlock, ok := e.WorkspaceLocks.TryLock(key)
+		if !ok {
+			reporter.OnMessage(ctx, "⏳ 该工作区正有另一个任务在执行，本任务已排队，前一个结束后自动开始。")
+			var lerr error
+			if unlock, lerr = e.WorkspaceLocks.LockContext(ctx, key); lerr != nil {
+				return fmt.Errorf("等待工作区空闲时被取消: %w", lerr)
+			}
+		}
+		defer unlock()
 	}
 	// 第 19 讲：根 Span 覆盖整个 Run；defer 保证成功/失败都会结束并导出"数字病历"
 	started := time.Now()
@@ -131,6 +160,15 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	ctx = runctx.WithRetrievalTask(ctx, fmt.Sprintf("main-%x", runStart.UnixNano()))
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (Thinking: %v, PlanMode: %v)", session.ID, session.WorkDir, e.EnableThinking, e.PlanMode)
 
+	if e.PlanMode {
+		if dir := archiveCompletedPlan(session.WorkDir, time.Now()); dir != "" {
+			log.Printf("[Engine] 🗄️ 上一个任务的 TODO 已全部完成，PLAN/TODO 已归档到 %s", dir)
+			root.Set("plan_archived", dir)
+		}
+	}
+	e.spiralMu.Lock()
+	delete(e.spiral, session.ID)
+	e.spiralMu.Unlock()
 	e.injector.Forget(session.ID) // 新的人类指令，重置死循环监控与熔断状态
 
 	// 根据当前 Session 的工作区动态组装 System Prompt（AGENTS.md + Skills + Plan Mode）
@@ -138,6 +176,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 
 	nudges := 0
 	knowledgeChecked := false
+	todoNudges := 0
 	for turn := 1; ; turn++ {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && e.durationExceeded(started) {
@@ -172,6 +211,16 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 				log.Printf("[Engine] ⚠️ 模型宣布要行动却没有调用工具，注入防早退提醒 (%d/%d)", nudges, e.EarlyExitNudges)
 				session.Append(schema.Message{Role: schema.RoleUser, Content: earlyExitNudge})
 				continue
+			}
+			// 第 02 讲作者答疑"完成度校验"：Plan Mode 下 TODO.md 仍有未勾选项时，模型说完成不算数
+			if e.PlanMode && todoNudges < maxTodoNudges {
+				if pending := uncheckedTodos(session.WorkDir); len(pending) > 0 {
+					todoNudges++
+					root.Add("todo_nudges", 1)
+					log.Printf("[Engine] 📋 TODO.md 仍有 %d 项未完成，拦截退出 (%d/%d)", len(pending), todoNudges, maxTodoNudges)
+					session.Append(schema.Message{Role: schema.RoleUser, Content: todoNudge(pending)})
+					continue
+				}
 			}
 			// 内层循环：交付前清点本轮知识（每次唤醒最多提醒一次，模型确认 none 也算清点过）
 			if e.Knowledge != nil && !knowledgeChecked && e.Knowledge.NeedsCheckpoint(session.ID, runStart) {
@@ -218,8 +267,12 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 
 	// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
 	// RepairToolPairs：会话若在工具执行中途被重启，历史里会残留"有调用没结果"，补齐后才能合法发送
-	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemory(e.WorkingMemoryLimit))...)
-	compacted := e.compactor.Compact(contextHistory)
+	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemoryBudget(e.WorkingMemoryLimit, e.WorkingMemoryMaxChars))...)
+	_, compactSpan := trace.Start(ctx, "Context.Compact") // 第 19 讲：压缩作为独立 Span，复盘时能看到何时、压了多少
+	compacted := e.compactorFor(session.ID, compactSpan).Compact(contextHistory)
+	compactSpan.Set("chars_before", ctxpkg.EstimateLength(contextHistory))
+	compactSpan.Set("chars_after", ctxpkg.EstimateLength(compacted))
+	compactSpan.End()
 	turnSpan.Set("context_message_count", len(compacted))
 	turnSpan.Set("context_chars", ctxpkg.EstimateLength(compacted))
 	if len(compacted) > 0 && ctxpkg.EstimateLength(compacted) < ctxpkg.EstimateLength(contextHistory) {
@@ -241,6 +294,9 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		if thinkResp.Content != "" {
 			thinking = thinkResp.Content
 			log.Printf("[Engine] 🧠 内部思考 Trace: %s", textutil.Truncate(thinking, 300, "..."))
+			if tc, ok := reporter.(interface{ OnThinkingContent(context.Context, string) }); ok {
+				tc.OnThinkingContent(ctx, thinking) // 阶段作业：把 Thinking 输出展示给人看（Reporter 自行决定是否显示）
+			}
 			compacted = append(compacted,
 				schema.Message{Role: schema.RoleAssistant, Content: thinking},
 				schema.Message{Role: schema.RoleUser, Content: actionNudge})
@@ -255,6 +311,7 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 	if err != nil {
 		return false, fmt.Errorf("Action 阶段生成失败: %w", err)
 	}
+	e.observeTokenRatio(session.ID, compacted, actionResp)
 	if len(actionResp.ToolCalls) == 0 {
 		if calls := recoverTextToolCalls(actionResp.Content, availableTools); len(calls) > 0 {
 			log.Printf("[Engine] 🔧 从正文中还原出 %d 个工具调用（模型没走结构化 tool_calls）", len(calls))
@@ -289,6 +346,10 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 		session.Append(*reminder)
 		turnSpan.Set("reminder_injected", true)
 		reporter.OnMessage(ctx, "⚠️ 检测到重复失败，已注入 System Reminder 干预。")
+	}
+	if m := e.checkExplorationSpiral(session.ID, actionResp.ToolCalls); m != nil {
+		session.Append(*m)
+		turnSpan.Set("exploration_spiral_reminder", true)
 	}
 	return false, nil
 }
@@ -370,7 +431,13 @@ func (e *AgentEngine) exportTrace(root *trace.Span, session *ctxpkg.Session) {
 	}
 }
 
-// MaxParallelTools 单轮最多同时运行的工具数（第 08 讲思考题：信号量限流）。
+// toolSlots 返回引擎级并发槽位（懒初始化，所有批次共享）。
+func (e *AgentEngine) toolSlots() chan struct{} {
+	e.slotsOnce.Do(func() { e.slots = make(chan struct{}, MaxParallelTools) })
+	return e.slots
+}
+
+// MaxParallelTools 引擎内同时运行的只读工具总数上限（第 08 讲思考题：全局信号量限流）。
 const MaxParallelTools = 5
 
 // executeTools 执行一批工具调用，并按模型原始顺序返回 Observation。
@@ -380,7 +447,54 @@ const MaxParallelTools = 5
 // 只要混入任何有副作用的工具（write/edit/bash），就退化为按顺序串行执行。
 // 两种路径都写入预分配切片的固定下标，天然保序、无需加锁。
 func (e *AgentEngine) executeTools(ctx context.Context, calls []schema.ToolCall, reporter Reporter) []schema.Message {
-	return e.executeToolsWith(ctx, e.registry, calls, reporter)
+	obs := e.executeToolsWith(ctx, e.registry, calls, reporter)
+	if e.PlanMode {
+		for i, c := range calls {
+			if !obs[i].IsError && updatesTodo(c) {
+				obs[i].Content += todoProgressNudge
+			}
+		}
+	}
+	return obs
+}
+
+// todoProgressNudge 第 13 讲作者答疑：勾选 TODO 后先停下来总结进展，再进入下一项，防止闷头连跑丢失全局视角。
+const todoProgressNudge = "\n\n[系统提醒]：TODO 状态更新已保存。请在继续下一项之前，先用一两句话总结你刚刚完成的进展，再接着执行。"
+
+func updatesTodo(c schema.ToolCall) bool {
+	if c.Name != "edit_file" && c.Name != "write_file" {
+		return false
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	return json.Unmarshal(c.Arguments, &in) == nil && filepath.Clean(in.Path) == "TODO.md"
+}
+
+// ExplorationSpiralThreshold 连续只读工具调用达到该次数且没有任何写动作时，提醒模型收敛（第 15 讲作者答疑）。
+const ExplorationSpiralThreshold = 10
+
+const explorationSpiralReminder = "[系统提醒] 你已经连续进行了大量只读探索（读文件、搜索、ls 等），却还没有任何实际修改或产出。请停下来：先总结目前已经确认的事实，判断信息是否已经足够；足够就开始动手，不够就明确说出还缺哪一条关键信息再定向查找，不要继续漫无目的地浏览。"
+
+// checkExplorationSpiral 统计会话内连续的只读调用；出现写动作即清零，达到阈值返回一次提醒并清零。
+func (e *AgentEngine) checkExplorationSpiral(sessionID string, calls []schema.ToolCall) *schema.Message {
+	e.spiralMu.Lock()
+	defer e.spiralMu.Unlock()
+	if e.spiral == nil {
+		e.spiral = map[string]int{}
+	}
+	for _, c := range calls {
+		if !e.registry.IsReadOnly(c.Name) {
+			delete(e.spiral, sessionID)
+			return nil
+		}
+	}
+	e.spiral[sessionID] += len(calls)
+	if e.spiral[sessionID] < ExplorationSpiralThreshold {
+		return nil
+	}
+	delete(e.spiral, sessionID)
+	return &schema.Message{Role: schema.RoleUser, Content: explorationSpiralReminder}
 }
 
 // executeToolsWith 使用指定注册表执行（子智能体用受限注册表）。
@@ -443,18 +557,135 @@ func (e *AgentEngine) executeToolsWith(ctx context.Context, registry tools.Regis
 	}
 
 	log.Printf("[Engine] 本批 %d 个工具均为只读，Fork 并发执行", len(calls))
-	sem := make(chan struct{}, MaxParallelTools)
+	sem := e.toolSlots() // 第 08 讲思考题：引擎级全局信号量，跨批次、跨会话、跨子 Agent 共享
 	var wg sync.WaitGroup
 	for i, c := range calls {
 		wg.Add(1)
 		go func(idx int, call schema.ToolCall) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			if call.Name != tools.SubagentToolName { // 编排型工具只等待子循环，不占槽位，避免嵌套死锁
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+				}
+			}
 			run(idx, call)
 		}(i, c)
 	}
 	wg.Wait()
 	log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 	return observations
+}
+
+// maxTodoNudges 每次唤醒最多因 TODO 未完成拦截退出的次数；超过后放行，避免与模型无限拉锯。
+const maxTodoNudges = 2
+
+// uncheckedTodos 读取工作区根目录 TODO.md 中未勾选的条目（经 os.Root，不跟随越界路径）。
+func uncheckedTodos(workDir string) []string {
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	b, err := root.ReadFile("TODO.md")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "- [ ]") || strings.HasPrefix(t, "* [ ]") {
+			out = append(out, strings.TrimSpace(t[5:]))
+		}
+	}
+	return out
+}
+
+func todoNudge(pending []string) string {
+	shown := pending
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	return fmt.Sprintf("[系统提醒] TODO.md 中仍有 %d 项未完成：%s。任务尚未全部完成，请继续执行；如果某项确实不再需要，请先在 TODO.md 中把它勾掉并注明取消原因，再给出最终结论。",
+		len(pending), strings.Join(shown, "；"))
+}
+
+// Registry 返回引擎挂载的工具注册表（装配校验与测试用）。
+func (e *AgentEngine) Registry() tools.Registry { return e.registry }
+
+// compactFraction 压缩在上下文窗口用到多少比例时触发。
+const compactFraction = 0.6
+
+// observeTokenRatio 用真实的 PromptTokens 校准"字符/Token"比例（中文、代码、英文差异很大，不能写死）。
+func (e *AgentEngine) observeTokenRatio(sessionID string, req []schema.Message, resp *schema.Message) {
+	if resp == nil || resp.Usage == nil || resp.Usage.PromptTokens <= 0 {
+		return
+	}
+	if chars := ctxpkg.EstimateLength(req); chars > 0 {
+		e.tokenRatios.Store(sessionID, float64(chars)/float64(resp.Usage.PromptTokens))
+	}
+}
+
+// compactorFor 返回本轮使用的压缩器：配置了上下文窗口且已有真实 Usage 时，阈值 = 窗口 × 0.6 × 字符/Token；
+// 否则沿用固定字符阈值（第 12 讲的默认实现）。
+func (e *AgentEngine) compactorFor(sessionID string, span *trace.Span) *ctxpkg.Compactor {
+	c := e.compactor
+	if e.ContextWindowTokens <= 0 {
+		return c
+	}
+	v, ok := e.tokenRatios.Load(sessionID)
+	if !ok {
+		return c
+	}
+	threshold := int(float64(e.ContextWindowTokens) * compactFraction * v.(float64))
+	if threshold < 4000 {
+		threshold = 4000
+	}
+	cc := *c
+	cc.MaxChars = threshold
+	if span != nil {
+		span.Set("compact_threshold_chars", threshold)
+	}
+	return &cc
+}
+
+// archiveCompletedPlan 第 13 讲作者答疑：TODO.md 全部勾选（且至少有一项）时，新任务开始前把 PLAN.md/TODO.md
+// 移到 .claw/archive/<时间>_task/，返回归档目录（相对工作区）；未完成或不存在时返回空。
+func archiveCompletedPlan(workDir string, now time.Time) string {
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	b, err := root.ReadFile("TODO.md")
+	if err != nil {
+		return ""
+	}
+	done := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "- [ ]") || strings.HasPrefix(t, "* [ ]") {
+			return "" // 仍有未完成项：这是同一个任务的延续，不归档
+		}
+		if strings.HasPrefix(strings.ToLower(t), "- [x]") || strings.HasPrefix(strings.ToLower(t), "* [x]") {
+			done++
+		}
+	}
+	if done == 0 {
+		return ""
+	}
+	dir := filepath.ToSlash(filepath.Join(".claw", "archive", now.Format("20060102-150405")+"_task"))
+	if err := root.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	for _, name := range []string{"PLAN.md", "TODO.md"} {
+		if _, err := root.Stat(name); err == nil {
+			if err := root.Rename(name, dir+"/"+name); err != nil {
+				log.Printf("[Engine] 归档 %s 失败: %v", name, err)
+				return ""
+			}
+		}
+	}
+	return dir
 }
