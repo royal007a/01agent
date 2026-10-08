@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,9 @@ type TestCase struct {
 	Approval string `json:"approval,omitempty"`
 	// Knowledge 为 true 时开启动态知识更新（交付前清点 + 外层归位）；一次性跑分默认关闭，省一轮交互
 	Knowledge bool `json:"knowledge,omitempty"`
+	// NoPrecheck 关闭 Fail-to-Pass 前置校验：判卷脚本是"不许破坏"型的守卫（如审批被拒后目录必须还在），
+	// 在 Agent 动手前本来就会通过。默认要求判卷脚本在 Agent 动手前失败（第 20 讲 SWE-bench 范式）。
+	NoPrecheck bool `json:"no_precheck,omitempty"`
 }
 
 // autoApprover 按用例策略自动审批，并记录审批次数。
@@ -84,6 +88,7 @@ type Result struct {
 	Approvals        int     `json:"approvals"`
 	WorkDir          string  `json:"work_dir,omitempty"`
 	TracePath        string  `json:"trace_path,omitempty"`
+	Score            float64 `json:"score"`
 	// ObservedModel 服务端回报的实际模型版本（环境锁定：同名模型换代时基线对比才有据可查）
 	ObservedModel string `json:"observed_model,omitempty"`
 }
@@ -100,7 +105,9 @@ type Report struct {
 	TotalCost  float64   `json:"total_cost_cny"`
 	DurationMs int64     `json:"duration_ms"`
 	AvgTurns   float64   `json:"avg_turns"`
-	Results    []Result  `json:"results"`
+	// AvgScore 平均综合得分（第 20 讲第 4 步：结合成本、耗时、轮数打分；失败计 0）
+	AvgScore float64  `json:"avg_score,omitempty"`
+	Results  []Result `json:"results"`
 	// Env 跑分时的环境快照；与基线不一致时，回归先归因到环境而不是代码
 	Env *envlock.Lock `json:"env,omitempty"`
 }
@@ -208,6 +215,11 @@ func (r *Runner) RunSuite(ctx context.Context, cases []TestCase) Report {
 		}
 	}
 	var turns int
+	var score float64
+	for i := range results {
+		results[i].Score = Score(results[i])
+		score += results[i].Score
+	}
 	for _, res := range results {
 		if res.Passed {
 			rep.Passed++
@@ -221,9 +233,32 @@ func (r *Runner) RunSuite(ctx context.Context, cases []TestCase) Report {
 	if rep.Total > 0 {
 		rep.PassRate = float64(rep.Passed) / float64(rep.Total)
 		rep.AvgTurns = float64(turns) / float64(rep.Total)
+		rep.AvgScore = score / float64(rep.Total)
 	}
 	rep.DurationMs = time.Since(start).Milliseconds()
 	return rep
+}
+
+// 综合得分的参考尺度：达到这些量时对应维度的效率分降到一半。
+const (
+	scoreRefTurns    = 10
+	scoreRefCostCNY  = 0.05
+	scoreRefDuration = 120 * time.Second
+)
+
+// Score 第 20 讲第 4 步的综合得分（0~100）：判卷不通过记 0；通过记 60 分底分，
+// 再按轮数（20）、成本（10）、耗时（10）的效率加分，效率 = 1/(1+实际/参考)：越省越接近满分，达到参考值得一半。
+// 只是同一套用例下比较 Harness 版本的相对指标，参考尺度随评测集调整。
+func Score(r Result) float64 {
+	if !r.Passed {
+		return 0
+	}
+	eff := func(x, ref float64) float64 { return 1 / (1 + x/ref) } // 0 → 1，等于参考值 → 0.5
+	s := 60 +
+		20*eff(float64(r.Turns), scoreRefTurns) +
+		10*eff(r.CostCNY, scoreRefCostCNY) +
+		10*eff(float64(r.DurationMs), float64(scoreRefDuration.Milliseconds()))
+	return math.Round(s*10) / 10
 }
 
 func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
@@ -261,6 +296,13 @@ func (r *Runner) runOne(ctx context.Context, tc TestCase) (res Result) {
 	if tc.Setup != "" {
 		if out, err := runScript(ctx, wd, tc.Setup, 2*time.Minute); err != nil {
 			res.Error = fmt.Sprintf("靶机 Setup 失败: %v\n%s", err, out)
+			return
+		}
+	}
+	// 1.5 Fail-to-Pass 前置校验（第 20 讲）：判卷脚本必须在 Agent 动手前失败，否则这道题测不出任何东西
+	if !tc.NoPrecheck {
+		if _, err := runScript(ctx, wd, tc.Validate, 3*time.Minute); err == nil {
+			res.Error = "用例无效：判卷脚本在 Agent 动手前就已通过，不满足 Fail-to-Pass（守卫型判卷请设置 no_precheck）"
 			return
 		}
 	}
@@ -349,8 +391,8 @@ func runScript(ctx context.Context, dir, script string, timeout time.Duration) (
 func (rep Report) Markdown(baseline *Report) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Harness Benchmark 报告\n\n- 时间：%s\n- 模型：%s（%s 协议）\n", rep.StartedAt.Format("2006-01-02 15:04:05"), rep.Model, rep.Protocol)
-	fmt.Fprintf(&b, "- 通过：**%d/%d（%.0f%%）**，一发入魂 %d 个\n- 总成本：¥%.4f，总耗时 %.1fs，平均 %.1f 轮\n",
-		rep.Passed, rep.Total, rep.PassRate*100, rep.FirstTry, rep.TotalCost, float64(rep.DurationMs)/1000, rep.AvgTurns)
+	fmt.Fprintf(&b, "- 通过：**%d/%d（%.0f%%）**，一发入魂 %d 个，平均综合得分 **%.1f**\n- 总成本：¥%.4f，总耗时 %.1fs，平均 %.1f 轮\n",
+		rep.Passed, rep.Total, rep.PassRate*100, rep.FirstTry, rep.AvgScore, rep.TotalCost, float64(rep.DurationMs)/1000, rep.AvgTurns)
 	if baseline != nil {
 		fmt.Fprintf(&b, "- 对比基线（%s）：通过率 %.0f%% → %.0f%%，成本 ¥%.4f → ¥%.4f，平均轮数 %.1f → %.1f\n",
 			baseline.StartedAt.Format("01-02 15:04"), baseline.PassRate*100, rep.PassRate*100, baseline.TotalCost, rep.TotalCost, baseline.AvgTurns, rep.AvgTurns)
@@ -364,11 +406,11 @@ func (rep Report) Markdown(baseline *Report) string {
 			fmt.Fprintf(&b, "> - %s\n", d)
 		}
 	}
-	b.WriteString("\n| 用例 | 结果 | 轮数 | 工具调用(失败) | 自愈提示 | Reminder | 审批 | Token 入/出 | 成本 | 耗时 |")
+	b.WriteString("\n| 用例 | 结果 | 得分 | 轮数 | 工具调用(失败) | 自愈提示 | Reminder | 审批 | Token 入/出 | 成本 | 耗时 |")
 	if baseline != nil {
 		b.WriteString(" 基线 |")
 	}
-	b.WriteString("\n|---|---|---|---|---|---|---|---|---|---|")
+	b.WriteString("\n|---|---|---|---|---|---|---|---|---|---|---|")
 	if baseline != nil {
 		b.WriteString("---|")
 	}
@@ -388,7 +430,7 @@ func (rep Report) Markdown(baseline *Report) string {
 		} else if r.Passed {
 			mark = "✅"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %d | %d(%d) | %d | %d | %d | %d/%d | ¥%.4f | %.1fs |", r.ID, mark, r.Turns, r.ToolCalls, r.ToolErrors,
+		fmt.Fprintf(&b, "| %s | %s | %.1f | %d | %d(%d) | %d | %d | %d | %d/%d | ¥%.4f | %.1fs |", r.ID, mark, r.Score, r.Turns, r.ToolCalls, r.ToolErrors,
 			r.RecoveryHints, r.Reminders, r.Approvals, r.PromptTokens, r.CompletionTokens, r.CostCNY, float64(r.DurationMs)/1000)
 		if baseline != nil {
 			if br, ok := base[r.ID]; !ok {

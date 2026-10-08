@@ -571,7 +571,9 @@ func TestPlanModeArchivesCompletedPlan(t *testing.T) {
 // pathRegistry：write/edit 视为写操作，其余只读；记录调用。
 type pathRegistry struct{ fakeRegistry }
 
-func (p *pathRegistry) IsReadOnly(name string) bool { return name != "edit_file" && name != "write_file" }
+func (p *pathRegistry) IsReadOnly(name string) bool {
+	return name != "edit_file" && name != "write_file"
+}
 
 // 第 13 讲作者答疑：模型更新 TODO.md 后，在工具结果里追加"先总结进展"的提醒。
 func TestTodoUpdateAppendsProgressNudge(t *testing.T) {
