@@ -439,3 +439,23 @@ func TestWriteLockIsAcquiredAfterMiddleware(t *testing.T) {
 	}
 	close(blockApproval)
 }
+
+// 自带截断的工具（bash 头尾、read_file 前 8000 字节）不能再被 Registry 截第二刀：
+// 否则 bash 的"共 N 字节"提示被吞，read_file 声称"截断至前 8000 字节"却丢了中间内容。
+func TestRegistryDoesNotDoubleTruncateSelfLimitedTools(t *testing.T) {
+	wd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wd, "big.txt"), []byte(strings.Repeat("0123456789", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	r.Register(NewBashTool(wd))
+	r.Register(NewReadFileTool(wd))
+	bash := r.Execute(context.Background(), schema.ToolCall{ID: "b", Name: "bash", Arguments: []byte(`{"command":"head -c 20000 /dev/zero | tr '\\0' a; echo; echo END"}`)})
+	if !strings.Contains(bash.Output, "终端输出过长（共") || strings.Contains(bash.Output, "工具输出超过") || !strings.Contains(bash.Output, "END") {
+		t.Fatalf("bash 被二次截断: ...%q", bash.Output[len(bash.Output)-200:])
+	}
+	rf := r.Execute(context.Background(), schema.ToolCall{ID: "r", Name: "read_file", Arguments: []byte(`{"path":"big.txt"}`)})
+	if strings.Contains(rf.Output, "工具输出超过") || !strings.HasPrefix(rf.Output, strings.Repeat("0123456789", ReadFileMaxBytes/10)) {
+		t.Fatalf("read_file 被二次截断（前 %d 字节应完整保留）", ReadFileMaxBytes)
+	}
+}

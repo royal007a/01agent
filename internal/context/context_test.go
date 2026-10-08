@@ -220,3 +220,13 @@ func TestEnvSection(t *testing.T) {
 		t.Fatalf("运行环境段落错误:\n%s", c)
 	}
 }
+
+// Registry 的统一参数校验（"参数校验失败"）同样要拿到自愈提示，否则 P0 引入的校验层会让类型错误失去救援指南。
+func TestRecoveryCoversRegistrySchemaValidation(t *testing.T) {
+	rm := NewRecoveryManager()
+	for _, raw := range []string{`参数校验失败: 缺少必填参数 "path"`, `参数校验失败: 参数 "limit" 必须是 number`} {
+		if got := rm.AnalyzeAndInject("read_file", raw); !strings.Contains(got, "系统救援指南") {
+			t.Errorf("schema 校验错误缺少救援提示: %q", got)
+		}
+	}
+}

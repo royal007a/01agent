@@ -19,6 +19,9 @@ type ToolMeta struct {
 
 type MetaProvider interface{ Meta() ToolMeta }
 
+// selfLimitSlack 自带截断的工具在自身上限之外附加的提示语（截断说明、退出码、超时备注）余量。
+const selfLimitSlack = 1024
+
 func metaOf(t BaseTool) ToolMeta {
 	if m, ok := t.(MetaProvider); ok {
 		return m.Meta()
