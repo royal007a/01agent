@@ -208,3 +208,12 @@ func TestGroupApprovalWithoutMentionReachesCommands(t *testing.T) {
 		t.Fatalf("群聊未 @ 的消息不应唤醒 Agent: %v", runs)
 	}
 }
+
+func TestCostSummary(t *testing.T) {
+	if got := CostSummary(1200, 300, 0.0123, true); !strings.Contains(got, "1200") || !strings.Contains(got, "¥0.0123") {
+		t.Fatalf("成本汇总格式不对: %q", got)
+	}
+	if got := CostSummary(0, 0, 0, false); strings.Contains(got, "¥0") {
+		t.Fatalf("没有 Usage 时不能显示 ¥0: %q", got)
+	}
+}
