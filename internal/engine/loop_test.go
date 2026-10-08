@@ -522,3 +522,23 @@ func TestGlobalToolConcurrencyCapWithNestedSubagents(t *testing.T) {
 		t.Fatalf("叶子工具总并发 %d 超过全局上限 %d", n.max, MaxParallelTools)
 	}
 }
+
+// 第 12 讲思考题：压缩阈值依据真实 PromptTokens 自适应，而不是写死字符数。
+func TestCompactionThresholdAdaptsToRealUsage(t *testing.T) {
+	e := NewAgentEngine(&scriptedProvider{}, &fakeRegistry{}, false, false)
+	if got := e.compactorFor("s", nil).MaxChars; got != 20000 {
+		t.Fatalf("未配置上下文窗口时沿用固定阈值, got %d", got)
+	}
+	e.ContextWindowTokens = 100000
+	if got := e.compactorFor("s", nil).MaxChars; got != 20000 {
+		t.Fatalf("还没有真实 Usage 时沿用固定阈值, got %d", got)
+	}
+	req := []schema.Message{{Role: schema.RoleUser, Content: strings.Repeat("a", 30000)}}
+	e.observeTokenRatio("s", req, &schema.Message{Usage: &schema.Usage{PromptTokens: 10000}}) // 3 字符/token
+	if got := e.compactorFor("s", nil).MaxChars; got != 180000 {
+		t.Fatalf("阈值应为 100000×0.6×3=180000, got %d", got)
+	}
+	if got := e.compactorFor("other", nil).MaxChars; got != 20000 {
+		t.Fatalf("比例按会话隔离, got %d", got)
+	}
+}

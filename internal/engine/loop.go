@@ -52,9 +52,12 @@ type AgentEngine struct {
 	WorkingMemoryMaxChars int
 	// MaxTurns 硬性预算熔断：单次唤醒最多跑多少个 Turn（0 表示不限制）。
 	// 课程主张不在 Loop 里做生硬截断，依赖 Compaction 与 Reminders；这里只作为最终兜底。
-	MaxTurns  int
-	slotsOnce sync.Once
-	slots     chan struct{}
+	MaxTurns int
+	// ContextWindowTokens 模型上下文窗口（token）。>0 时压缩阈值按真实 PromptTokens 自适应（第 12 讲思考题）
+	ContextWindowTokens int
+	tokenRatios         sync.Map // sessionID -> 每 token 对应的字符数（来自上一次请求的真实 Usage）
+	slotsOnce           sync.Once
+	slots               chan struct{}
 	// WorkspaceLocks 非空时，同一工作区的 Run 互斥（第 09 讲思考题）；app.Build 注入进程级共享表。
 	WorkspaceLocks *keylock.Table
 	// Run 级硬预算；0 表示该维度不启用。预算按本次唤醒相对 Session 基线计算。
@@ -253,7 +256,7 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 	// 1. 上下文组装：System Prompt + Working Memory，再过一遍内存压缩器
 	// RepairToolPairs：会话若在工具执行中途被重启，历史里会残留"有调用没结果"，补齐后才能合法发送
 	contextHistory := append([]schema.Message{systemMsg}, ctxpkg.RepairToolPairs(session.GetWorkingMemoryBudget(e.WorkingMemoryLimit, e.WorkingMemoryMaxChars))...)
-	compacted := e.compactor.Compact(contextHistory)
+	compacted := e.compactorFor(session.ID, turnSpan).Compact(contextHistory)
 	turnSpan.Set("context_message_count", len(compacted))
 	turnSpan.Set("context_chars", ctxpkg.EstimateLength(compacted))
 	if len(compacted) > 0 && ctxpkg.EstimateLength(compacted) < ctxpkg.EstimateLength(contextHistory) {
@@ -292,6 +295,7 @@ func (e *AgentEngine) runTurn(ctx context.Context, turnSpan *trace.Span, session
 	if err != nil {
 		return false, fmt.Errorf("Action 阶段生成失败: %w", err)
 	}
+	e.observeTokenRatio(session.ID, compacted, actionResp)
 	if len(actionResp.ToolCalls) == 0 {
 		if calls := recoverTextToolCalls(actionResp.Content, availableTools); len(calls) > 0 {
 			log.Printf("[Engine] 🔧 从正文中还原出 %d 个工具调用（模型没走结构化 tool_calls）", len(calls))
@@ -542,3 +546,39 @@ func todoNudge(pending []string) string {
 
 // Registry 返回引擎挂载的工具注册表（装配校验与测试用）。
 func (e *AgentEngine) Registry() tools.Registry { return e.registry }
+
+// compactFraction 压缩在上下文窗口用到多少比例时触发。
+const compactFraction = 0.6
+
+// observeTokenRatio 用真实的 PromptTokens 校准"字符/Token"比例（中文、代码、英文差异很大，不能写死）。
+func (e *AgentEngine) observeTokenRatio(sessionID string, req []schema.Message, resp *schema.Message) {
+	if resp == nil || resp.Usage == nil || resp.Usage.PromptTokens <= 0 {
+		return
+	}
+	if chars := ctxpkg.EstimateLength(req); chars > 0 {
+		e.tokenRatios.Store(sessionID, float64(chars)/float64(resp.Usage.PromptTokens))
+	}
+}
+
+// compactorFor 返回本轮使用的压缩器：配置了上下文窗口且已有真实 Usage 时，阈值 = 窗口 × 0.6 × 字符/Token；
+// 否则沿用固定字符阈值（第 12 讲的默认实现）。
+func (e *AgentEngine) compactorFor(sessionID string, span *trace.Span) *ctxpkg.Compactor {
+	c := e.compactor
+	if e.ContextWindowTokens <= 0 {
+		return c
+	}
+	v, ok := e.tokenRatios.Load(sessionID)
+	if !ok {
+		return c
+	}
+	threshold := int(float64(e.ContextWindowTokens) * compactFraction * v.(float64))
+	if threshold < 4000 {
+		threshold = 4000
+	}
+	cc := *c
+	cc.MaxChars = threshold
+	if span != nil {
+		span.Set("compact_threshold_chars", threshold)
+	}
+	return &cc
+}

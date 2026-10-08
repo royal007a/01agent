@@ -120,6 +120,8 @@ func Build(o Options) (*App, error) {
 	eng := engine.NewAgentEngine(tracker, registry, o.Thinking, o.PlanMode)
 	// 第 09 讲思考题：进程内所有引擎共享一张工作区锁表，HTTP / 飞书 / 多会话对同一目录的任务排队执行
 	eng.WorkspaceLocks = workspaceLocks
+	// 第 12 讲思考题：配置模型上下文窗口（token）后，压缩阈值按真实 PromptTokens 自适应
+	eng.ContextWindowTokens = envInt("CLAW_CONTEXT_TOKENS")
 	eng.MaxDuration = o.MaxDuration
 	if eng.MaxDuration == 0 {
 		eng.MaxDuration = envDuration("CLAW_MAX_RUN_SECONDS", 30*time.Minute)
