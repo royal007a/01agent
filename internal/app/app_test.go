@@ -223,3 +223,37 @@ func TestWorkspaceCanDisableKnowledge(t *testing.T) {
 		t.Fatalf("工作区声明 disabled 后不应挂载知识更新: err=%v", err)
 	}
 }
+
+// pwnModel：主 Agent 派子 Agent；子 Agent 试图用 bash 写文件；随后各自结束。
+type pwnModel struct{}
+
+func (pwnModel) Generate(_ context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
+	last := msgs[len(msgs)-1]
+	isSub := strings.Contains(msgs[0].Content, "探路者")
+	switch {
+	case isSub && !last.IsToolResult():
+		return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "w", Name: "bash", Arguments: []byte(`{"command":"echo x > pwned"}`)}}}, nil
+	case isSub:
+		return &schema.Message{Role: schema.RoleAssistant, Content: "汇报：" + last.Content}, nil
+	case !last.IsToolResult():
+		return &schema.Message{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{{ID: "s", Name: "spawn_subagent", Arguments: []byte(`{"task_prompt":"写个文件"}`)}}}, nil
+	default:
+		return &schema.Message{Role: schema.RoleAssistant, Content: "完成。"}, nil
+	}
+}
+
+// 装配级回归：子 Agent 的 bash 被 AsReadOnly 标记为只读后，真正的只读保证来自 ReadOnlyGuard——
+// 通过 Build 出来的引擎让子 Agent 尝试写文件，必须被拦截且工作区没有产物。
+func TestBuildSubagentBashCannotWrite(t *testing.T) {
+	wd := t.TempDir()
+	a, err := Build(Options{WorkDir: wd, LLM: pwnModel{}, StateDir: t.TempDir(), NoKnowledge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Engine.Chat(context.Background(), ctxpkg.NewSession("pwn", wd), "派子 Agent", engine.NopReporter{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, "pwned")); !os.IsNotExist(err) {
+		t.Fatal("子 Agent 通过 bash 写出了文件：只读守卫没有生效")
+	}
+}

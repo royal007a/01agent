@@ -474,6 +474,7 @@ func TestWorkspaceLockSerializesRunsAcrossSessions(t *testing.T) {
 // nestRegistry：所有工具只读；spawn_subagent 在执行中再并发派发 5 个叶子工具（模拟子 Agent 的并行批次）。
 type nestRegistry struct {
 	e           *AgentEngine
+	arrived     *sync.WaitGroup // 所有 spawn 都已开始执行（若它们占槽位，此刻槽位已被占满）后才派发叶子，使死锁可确定复现
 	mu          sync.Mutex
 	active, max int
 }
@@ -486,6 +487,10 @@ func (n *nestRegistry) GetAvailableTools() []schema.ToolDefinition {
 }
 func (n *nestRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
 	if call.Name == tools.SubagentToolName {
+		if n.arrived != nil {
+			n.arrived.Done()
+			n.arrived.Wait()
+		}
 		leaves := make([]schema.ToolCall, 5)
 		for i := range leaves {
 			leaves[i] = schema.ToolCall{ID: fmt.Sprint(i), Name: "leaf"}
@@ -509,7 +514,9 @@ func (n *nestRegistry) Execute(ctx context.Context, call schema.ToolCall) schema
 // 第 08 讲思考题：并发上限是全局的——5 个并行子 Agent 各自再并发 5 个工具，叶子工具总并发仍 ≤ MaxParallelTools，且不死锁。
 func TestGlobalToolConcurrencyCapWithNestedSubagents(t *testing.T) {
 	e := NewAgentEngine(&scriptedProvider{}, &fakeRegistry{}, false, false)
-	n := &nestRegistry{e: e}
+	var arrived sync.WaitGroup
+	arrived.Add(5)
+	n := &nestRegistry{e: e, arrived: &arrived}
 	calls := make([]schema.ToolCall, 5)
 	for i := range calls {
 		calls[i] = schema.ToolCall{ID: fmt.Sprint("s", i), Name: tools.SubagentToolName}
